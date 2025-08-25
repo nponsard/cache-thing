@@ -1,5 +1,11 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
+use flate2::{Compression, write::GzEncoder};
+
+use crate::storage_backend::StorageBackend;
+
+mod folder_backend;
+pub mod storage_backend;
 
 #[derive(Debug, Parser)] // requires `derive` feature
 #[command(name = "git")]
@@ -57,8 +63,37 @@ fn try_main() -> Result<i32> {
 }
 
 fn push(args: &PushArgs) -> Result<i32> {
-    unimplemented!()
+    let file_backend = get_backend();
+
+    let key = args.prefix.clone();
+
+    let writer = file_backend.writer(&key)?;
+    let encoder = GzEncoder::new(writer, Compression::default());
+    let mut archive = tar::Builder::new(encoder);
+    for file in &args.files {
+        let stat = std::fs::metadata(file)?;
+        if stat.is_dir() {
+            archive.append_dir_all(file, file)?;
+        } else {
+            archive.append_path_with_name(file,file)?;
+        }
+    }
+
+    archive.finish()?;
+    Ok(0)
 }
 fn pull(args: &PullArgs) -> Result<i32> {
-    unimplemented!()
+    let file_backend = get_backend();
+
+    let key = args.prefix.clone();
+
+    let reader = file_backend.reader(&key)?;
+    let decoder = flate2::read::GzDecoder::new(reader);
+    let mut archive = tar::Archive::new(decoder);
+    archive.unpack(".")?;
+    Ok(0)
+}
+
+fn get_backend() -> impl StorageBackend {
+    folder_backend::FolderBackend::new(std::path::PathBuf::from("/tmp/cache-thing/data"))
 }
