@@ -8,9 +8,9 @@ use crate::storage_backend::StorageBackend;
 mod folder_backend;
 pub mod storage_backend;
 
-#[derive(Debug, Parser)] // requires `derive` feature
-#[command(name = "git")]
-#[command(about = "A fictional versioning CLI", long_about = None)]
+#[derive(Debug, Parser)]
+#[command(name = "cache-thing")]
+#[command(about = "Git-based caching tool", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
