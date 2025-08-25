@@ -156,17 +156,21 @@ fn possible_restore_keys(prefix: &str, suffix: Option<String>) -> Result<Vec<Str
         }
     };
     let main_commit = main_ref.peel_to_commit()?;
-
     let head = repository.head_commit()?;
-    let parent_commits = head
-        .ancestors()
-        .first_parent_only()
-        .with_boundary([main_commit.id])
-        .all()?
-        .take(10);
+
+    // look for cache in the last 10 commits in the current branch.
+    // if we are on main we look at the last 10 commits of main.
+    let parent_commits = head.ancestors().first_parent_only();
+    let parrent_commits = if head.id == main_commit.id {
+        parent_commits
+    } else {
+        parent_commits.with_boundary([main_commit.id])
+    };
+
+    let parent_commits_list = parrent_commits.all()?.take(10);
 
     let mut keys = Vec::new();
-    for element in parent_commits {
+    for element in parent_commits_list {
         let commit = element?.object()?;
         if suffix.is_some() {
             keys.push(format_key(prefix, commit.clone(), suffix.clone()));
