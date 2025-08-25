@@ -1,7 +1,8 @@
 use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
 use flate2::{Compression, write::GzEncoder};
-use gix::Commit;
+use gix::ObjectId;
+use log::{debug, info, trace};
 
 use crate::storage_backend::StorageBackend;
 
@@ -63,6 +64,8 @@ fn main() {
 }
 
 fn try_main() -> Result<i32> {
+    env_logger::init();
+
     let args = Cli::parse();
 
     match &args.command {
@@ -76,19 +79,25 @@ fn push(args: &PushArgs) -> Result<i32> {
 
     let key = current_key(&args.prefix, args.suffix.clone())?;
 
+    info!("Storing cache with key {}", &key);
+
     let writer = file_backend.writer(&key)?;
     let encoder = GzEncoder::new(writer, Compression::default());
     let mut archive = tar::Builder::new(encoder);
     for file in &args.files {
         let stat = std::fs::metadata(file)?;
         if stat.is_dir() {
+            trace!("Adding directory {} to archive", file);
             archive.append_dir_all(file, file)?;
         } else {
+            trace!("Adding file {} to archive", file);
             archive.append_path_with_name(file, file)?;
         }
     }
 
     archive.finish()?;
+
+    info!("Cache stored with key {}", &key);
     Ok(0)
 }
 fn pull(args: &PullArgs) -> Result<i32> {
@@ -97,7 +106,9 @@ fn pull(args: &PullArgs) -> Result<i32> {
     let possible_keys = possible_restore_keys(&args.prefix, args.suffix.clone())?;
     let mut key = None;
     for k in possible_keys {
+        trace!("Looking for cache with key {}", &k);
         if file_backend.exists(&k)? {
+            debug!("Found cache with key {}", &k);
             key = Some(k);
             break;
         }
@@ -129,14 +140,14 @@ fn current_key(prefix: &str, suffix: Option<String>) -> Result<String> {
     let repository = gix::discover(".")?;
     let head = repository.head_commit()?;
 
-    Ok(format_key(prefix, head, suffix))
+    Ok(format_key(prefix, head.id, suffix))
 }
 
-fn format_key(prefix: &str, commit: Commit, suffix: Option<String>) -> String {
+fn format_key(prefix: &str, commit: ObjectId, suffix: Option<String>) -> String {
     if let Some(suffix) = suffix {
-        format!("{}-{}-{}", prefix, commit.id, suffix)
+        format!("{}-{}-{}", prefix, commit, suffix)
     } else {
-        format!("{}-{}", prefix, commit.id)
+        format!("{}-{}", prefix, commit)
     }
 }
 
@@ -156,7 +167,9 @@ fn possible_restore_keys(prefix: &str, suffix: Option<String>) -> Result<Vec<Str
         }
     };
     let main_commit = main_ref.peel_to_commit()?;
+    trace!("Main branch is at commit {}", main_commit.id);
     let head = repository.head_commit()?;
+    trace!("Current HEAD is at commit {}", head.id);
 
     // look for cache in the last 10 commits in the current branch.
     // if we are on main we look at the last 10 commits of main.
@@ -171,16 +184,17 @@ fn possible_restore_keys(prefix: &str, suffix: Option<String>) -> Result<Vec<Str
 
     let mut keys = Vec::new();
     for element in parent_commits_list {
-        let commit = element?.object()?;
+        let commit = element?.id;
+        trace!("Considering commit {:?}", commit);
         if suffix.is_some() {
-            keys.push(format_key(prefix, commit.clone(), suffix.clone()));
+            keys.push(format_key(prefix, commit, suffix.clone()));
         }
         keys.push(format_key(prefix, commit, None));
     }
 
     if suffix.is_some() {
-        keys.push(format_key(prefix, main_commit.clone(), suffix));
+        keys.push(format_key(prefix, main_commit.id, suffix));
     }
-    keys.push(format_key(prefix, main_commit, None));
+    keys.push(format_key(prefix, main_commit.id, None));
     Ok(keys)
 }

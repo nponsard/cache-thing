@@ -13,6 +13,7 @@ jobs:
     runs-on: arc-runners-nponsard
     env:
       CACHE_THING_LOCATION: /mnt/sccache/cache-thing
+      RUST_LOG: trace
 
     steps:
       - uses: actions/checkout@v4
@@ -27,7 +28,7 @@ jobs:
 
       - name: clear target
         run: rm -rf target
-        
+
       - name: restore cargo cache
         run: ./cache-thing pull --prefix build -f target || true # ignore missing cache
 
