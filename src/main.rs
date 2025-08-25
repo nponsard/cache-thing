@@ -117,7 +117,12 @@ fn pull(args: &PullArgs) -> Result<i32> {
 }
 
 fn get_backend() -> impl StorageBackend {
-    folder_backend::FolderBackend::new(std::path::PathBuf::from("/tmp/cache-thing/data"))
+    // TODO: storage backend selection
+
+    let location =
+        std::env::var("CACHE_THING_LOCATION").unwrap_or("/tmp/cache-thing/data".to_string());
+
+    folder_backend::FolderBackend::new(std::path::PathBuf::from(location))
 }
 
 fn current_key(prefix: &str, suffix: Option<String>) -> Result<String> {
