@@ -1,6 +1,7 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
 use flate2::{Compression, write::GzEncoder};
+use gix::{Commit, config::key};
 
 use crate::storage_backend::StorageBackend;
 
@@ -65,7 +66,7 @@ fn try_main() -> Result<i32> {
 fn push(args: &PushArgs) -> Result<i32> {
     let file_backend = get_backend();
 
-    let key = args.prefix.clone();
+    let key = current_key(&args.prefix, None)?;
 
     let writer = file_backend.writer(&key)?;
     let encoder = GzEncoder::new(writer, Compression::default());
@@ -75,7 +76,7 @@ fn push(args: &PushArgs) -> Result<i32> {
         if stat.is_dir() {
             archive.append_dir_all(file, file)?;
         } else {
-            archive.append_path_with_name(file,file)?;
+            archive.append_path_with_name(file, file)?;
         }
     }
 
@@ -85,7 +86,20 @@ fn push(args: &PushArgs) -> Result<i32> {
 fn pull(args: &PullArgs) -> Result<i32> {
     let file_backend = get_backend();
 
-    let key = args.prefix.clone();
+    let possible_keys = possible_restore_keys(&args.prefix, None)?;
+    let mut key = None;
+    for k in possible_keys {
+        if file_backend.exists(&k)? {
+            key = Some(k);
+            break;
+        }
+    }
+
+    let key = if let Some(k) = key {
+        k
+    } else {
+        bail!("No cache found for prefix {}", &args.prefix);
+    };
 
     let reader = file_backend.reader(&key)?;
     let decoder = flate2::read::GzDecoder::new(reader);
@@ -96,4 +110,55 @@ fn pull(args: &PullArgs) -> Result<i32> {
 
 fn get_backend() -> impl StorageBackend {
     folder_backend::FolderBackend::new(std::path::PathBuf::from("/tmp/cache-thing/data"))
+}
+
+fn current_key(prefix: &str, suffix: Option<&str>) -> Result<String> {
+    let repository = gix::discover(".")?;
+    let head = repository.head_commit()?;
+
+    Ok(format_key(prefix, head, suffix))
+}
+
+fn format_key(prefix: &str, commit: Commit, suffix: Option<&str>) -> String {
+    if let Some(suffix) = suffix {
+        format!("{}-{}-{}", prefix, commit.id, suffix)
+    } else {
+        format!("{}-{}", prefix, commit.id)
+    }
+}
+
+fn possible_restore_keys(prefix: &str, suffix: Option<&str>) -> Result<Vec<String>> {
+    let repository = gix::discover(".")?;
+
+    let main_ref = repository.try_find_reference("main")?;
+    let mut main_ref = if let Some(r) = main_ref {
+        r
+    } else {
+        let master_ref = repository.try_find_reference("master")?;
+        if let Some(r) = master_ref {
+            r
+        } else {
+            bail!("Could not find 'main' or 'master' reference");
+        }
+    };
+    let main_commit = main_ref.peel_to_commit()?;
+
+    let head = repository.head_commit()?;
+    let parent_commits = head
+        .ancestors()
+        .first_parent_only()
+        .with_boundary([main_commit.id])
+        .all()?
+        .take(10);
+
+    let mut keys = Vec::new();
+    for element in parent_commits {
+        let commit = element?.object()?;
+        keys.push(format_key(prefix, commit.clone(), suffix));
+        keys.push(format_key(prefix, commit, None));
+    }
+
+    keys.push(format_key(prefix, main_commit.clone(), suffix));
+    keys.push(format_key(prefix, main_commit, None));
+    Ok(keys)
 }

@@ -25,4 +25,8 @@ impl StorageBackend for FolderBackend {
         let file = std::fs::File::create(path)?;
         Ok(Box::new(file))
     }
+    fn exists(&self, key: &str) -> Result<bool, Self::Error> {
+        let path = self.base_path.join(key);
+        Ok(path.exists())
+    }
 }
