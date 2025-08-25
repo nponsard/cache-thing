@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
 use flate2::{Compression, write::GzEncoder};
-use gix::{Commit, config::key};
+use gix::Commit;
 
 use crate::storage_backend::StorageBackend;
 
@@ -31,6 +31,10 @@ struct PushArgs {
     /// Name of the cache, to differentiate if multiple are stored in the same backend
     #[arg(short, long)]
     prefix: String,
+
+    /// Optional suffix to append to the cache key
+    #[arg(short, long)]
+    suffix: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -41,6 +45,10 @@ struct PullArgs {
     /// Name of the cache, to differentiate if multiple are stored in the same backend
     #[arg(short, long)]
     prefix: String,
+
+    /// Optional suffix
+    #[arg(short, long)]
+    suffix: Option<String>,
 }
 
 fn main() {
@@ -66,7 +74,7 @@ fn try_main() -> Result<i32> {
 fn push(args: &PushArgs) -> Result<i32> {
     let file_backend = get_backend();
 
-    let key = current_key(&args.prefix, None)?;
+    let key = current_key(&args.prefix, args.suffix.clone())?;
 
     let writer = file_backend.writer(&key)?;
     let encoder = GzEncoder::new(writer, Compression::default());
@@ -86,7 +94,7 @@ fn push(args: &PushArgs) -> Result<i32> {
 fn pull(args: &PullArgs) -> Result<i32> {
     let file_backend = get_backend();
 
-    let possible_keys = possible_restore_keys(&args.prefix, None)?;
+    let possible_keys = possible_restore_keys(&args.prefix, args.suffix.clone())?;
     let mut key = None;
     for k in possible_keys {
         if file_backend.exists(&k)? {
@@ -112,14 +120,14 @@ fn get_backend() -> impl StorageBackend {
     folder_backend::FolderBackend::new(std::path::PathBuf::from("/tmp/cache-thing/data"))
 }
 
-fn current_key(prefix: &str, suffix: Option<&str>) -> Result<String> {
+fn current_key(prefix: &str, suffix: Option<String>) -> Result<String> {
     let repository = gix::discover(".")?;
     let head = repository.head_commit()?;
 
     Ok(format_key(prefix, head, suffix))
 }
 
-fn format_key(prefix: &str, commit: Commit, suffix: Option<&str>) -> String {
+fn format_key(prefix: &str, commit: Commit, suffix: Option<String>) -> String {
     if let Some(suffix) = suffix {
         format!("{}-{}-{}", prefix, commit.id, suffix)
     } else {
@@ -127,9 +135,10 @@ fn format_key(prefix: &str, commit: Commit, suffix: Option<&str>) -> String {
     }
 }
 
-fn possible_restore_keys(prefix: &str, suffix: Option<&str>) -> Result<Vec<String>> {
+fn possible_restore_keys(prefix: &str, suffix: Option<String>) -> Result<Vec<String>> {
     let repository = gix::discover(".")?;
 
+    // TODO: ability to set a different default branch
     let main_ref = repository.try_find_reference("main")?;
     let mut main_ref = if let Some(r) = main_ref {
         r
@@ -154,11 +163,15 @@ fn possible_restore_keys(prefix: &str, suffix: Option<&str>) -> Result<Vec<Strin
     let mut keys = Vec::new();
     for element in parent_commits {
         let commit = element?.object()?;
-        keys.push(format_key(prefix, commit.clone(), suffix));
+        if suffix.is_some() {
+            keys.push(format_key(prefix, commit.clone(), suffix.clone()));
+        }
         keys.push(format_key(prefix, commit, None));
     }
 
-    keys.push(format_key(prefix, main_commit.clone(), suffix));
+    if suffix.is_some() {
+        keys.push(format_key(prefix, main_commit.clone(), suffix));
+    }
     keys.push(format_key(prefix, main_commit, None));
     Ok(keys)
 }
