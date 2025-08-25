@@ -1,0 +1,38 @@
+name: CI-build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  cargo-test:
+    runs-on: arc-runners-nponsard
+    env:
+      CACHE_THING_LOCATION: /mnt/sccache/cache-thing
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # this is a bit stupid, build itself to restore the cache, the retry the build
+
+      - name: Build cache-thing
+        run: cargo build --release
+
+      - name: save binary
+        run: cp target/release/cache-thing ./cache-thing
+
+      - name: clear target
+        run: rm -rf target
+        
+      - name: restore cargo cache
+        run: ./cache-thing pull --prefix build -f target || true # ignore missing cache
+
+      - name: Build cache-thing again
+        run: cargo build --release
+      
+      - name: push cargo cache
+        run: ./cache-thing push --prefix build -f target
