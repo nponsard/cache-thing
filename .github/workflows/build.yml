@@ -14,6 +14,7 @@ jobs:
     env:
       CACHE_THING_LOCATION: /cache/cache-thing
       RUST_LOG: trace
+      CARGO_HOME: /home/runner/.cargo
 
     steps:
       # Clone the entire repo so we can access the commit history and the main branch
@@ -33,10 +34,10 @@ jobs:
         run: rm -rf target
 
       - name: restore cargo cache
-        run: ./cache-thing pull --prefix build -f target || true # ignore missing cache
+        run: ./cache-thing pull --prefix build -f target -f /home/runner/.cargo || true # ignore missing cache
 
       - name: Build cache-thing again
         run: cargo build --release
 
       - name: push cargo cache
-        run: ./cache-thing push --prefix build -f target
+        run: ./cache-thing push --prefix build -f target -f /home/runner/.cargo
