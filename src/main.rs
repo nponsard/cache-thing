@@ -234,7 +234,7 @@ fn possible_restore_keys(prefix: &str, suffix: Option<String>) -> Result<Vec<Str
 
     // look for cache in the last 10 commits in the current branch.
     // if we are on main we look at the last 10 commits of main.
-    let parent_commits = head.ancestors().first_parent_only();
+    let parent_commits = head.ancestors();
     let parrent_commits = if head.id == main_commit.id {
         parent_commits
     } else {
