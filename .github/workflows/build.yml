@@ -9,14 +9,17 @@ on:
       - main
 
 jobs:
-  cargo-test:
+  build-test:
     runs-on: arc-runners-nponsard
     env:
-      CACHE_THING_LOCATION: /mnt/sccache/cache-thing
+      CACHE_THING_LOCATION: /cache/cache-thing
       RUST_LOG: trace
 
     steps:
+      # Clone the entire repo so we can access the commit history and the main branch
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # this is a bit stupid, build itself to restore the cache, the retry the build
 
@@ -34,6 +37,6 @@ jobs:
 
       - name: Build cache-thing again
         run: cargo build --release
-      
+
       - name: push cargo cache
         run: ./cache-thing push --prefix build -f target
