@@ -1,3 +1,5 @@
+use log::trace;
+
 use crate::storage_backend::StorageBackend;
 
 pub struct FolderBackend {
@@ -19,7 +21,9 @@ impl StorageBackend for FolderBackend {
     }
     fn writer(&self, key: &str) -> Result<impl std::io::Write, Self::Error> {
         let path = self.base_path.join(key);
+        trace!("Writing to path {:?}", path);
         if let Some(parent) = path.parent() {
+            trace!("Creating parent directory {:?}", parent);
             std::fs::create_dir_all(parent)?;
         }
         let file = std::fs::File::create(path)?;
