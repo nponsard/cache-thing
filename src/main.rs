@@ -1,8 +1,11 @@
+use std::path::{Path, PathBuf};
+
 use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
 use flate2::{Compression, write::GzEncoder};
-use gix::{Commit, ObjectId, Repository, reference::head_id};
+use gix::{Commit, ObjectId, Repository, hashtable::hash_map::HashMap, progress::prodash::warn};
 use log::{debug, info, trace};
+use sha2::{Digest, Sha256};
 
 use crate::storage_backend::StorageBackend;
 
@@ -86,12 +89,13 @@ fn push(args: &PushArgs) -> Result<i32> {
     let mut archive = tar::Builder::new(encoder);
     for file in &args.files {
         let stat = std::fs::metadata(file)?;
+        let hash = hash_from_path(file);
         if stat.is_dir() {
             trace!("Adding directory {} to archive", file);
-            archive.append_dir_all(file, file)?;
+            archive.append_dir_all(hash, file)?;
         } else {
             trace!("Adding file {} to archive", file);
-            archive.append_path_with_name(file, file)?;
+            archive.append_path_with_name(file, hash)?;
         }
     }
 
@@ -100,6 +104,12 @@ fn push(args: &PushArgs) -> Result<i32> {
     info!("Cache stored with key {}", &key);
     Ok(0)
 }
+
+struct FileEntry {
+    pub path: String,
+    pub extracted: bool,
+}
+
 fn pull(args: &PullArgs) -> Result<i32> {
     let file_backend = get_backend();
 
@@ -120,10 +130,57 @@ fn pull(args: &PullArgs) -> Result<i32> {
         bail!("No cache found for prefix {}", &args.prefix);
     };
 
+    let mut file_etries: HashMap<String, FileEntry> = args
+        .files
+        .iter()
+        .map(|f| {
+            let hash = hash_from_path(f);
+            (
+                hash.clone(),
+                FileEntry {
+                    path: f.clone(),
+                    extracted: false,
+                },
+            )
+        })
+        .collect();
+
     let reader = file_backend.reader(&key)?;
     let decoder = flate2::read::GzDecoder::new(reader);
     let mut archive = tar::Archive::new(decoder);
-    archive.unpack(".")?;
+
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?;
+        let components = path.components().collect::<Vec<_>>();
+        let hash = components.first().unwrap().as_os_str().to_string_lossy();
+
+        if let Some(file_entry) = file_etries.get_mut(&hash.to_string()) {
+            let without_hash = components.iter().skip(1).collect::<PathBuf>();
+            let mut output_path = PathBuf::from(&file_entry.path);
+            output_path.push(&without_hash);
+
+            trace!(
+                "Extracting file {} to {}",
+                path.to_string_lossy(),
+                output_path.to_string_lossy()
+            );
+            entry.unpack(output_path)?;
+            file_entry.extracted = true;
+        } else {
+            trace!(
+                "Skipping file {} (not in requested files)",
+                path.to_string_lossy()
+            );
+        }
+    }
+
+    for (_, file_entry) in &file_etries {
+        if !file_entry.extracted {
+            warn!("File {} was asked but not found in cache", file_entry.path);
+        }
+    }
+
     Ok(0)
 }
 
@@ -176,6 +233,13 @@ fn possible_restore_keys(prefix: &str, suffix: Option<String>) -> Result<Vec<Str
 
     let head = repository.head_commit()?;
     trace!("Current HEAD is at commit {}", head.id);
+
+    let head_ref = repository.head()?;
+    let ref_name = head_ref.referent_name();
+    trace!(
+        "Current HEAD is at reference {:?}",
+        ref_name.map(|s| s.as_partial_name().as_bstr())
+    );
 
     let head_parents = head.parent_ids().map(|p| p.detach()).collect::<Vec<_>>();
 
@@ -240,5 +304,14 @@ fn main_commit(repository: &'_ Repository) -> Result<Commit<'_>> {
     };
     let main_commit = main_ref.peel_to_commit()?;
     trace!("Main branch is at commit {}", main_commit.id);
+    
     Ok(main_commit)
+}
+
+fn hash_from_path<P>(path: P) -> String
+where
+    P: AsRef<Path>,
+{
+    let hash = Sha256::digest(path.as_ref().to_string_lossy().as_bytes());
+    base16ct::lower::encode_string(&hash)
 }
