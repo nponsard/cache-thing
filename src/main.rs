@@ -153,23 +153,27 @@ fn format_key(prefix: &str, commit: ObjectId, suffix: Option<String>) -> String 
 
 fn possible_restore_keys(prefix: &str, suffix: Option<String>) -> Result<Vec<String>> {
     let repository = gix::discover(".")?;
-
+    
     // TODO: ability to set a different default branch
-    let main_ref = repository.try_find_reference("main")?;
+    let main_ref = repository.try_find_reference("origin/main")?;
     let mut main_ref = if let Some(r) = main_ref {
         r
     } else {
-        let master_ref = repository.try_find_reference("master")?;
+        let master_ref = repository.try_find_reference("origin/master")?;
         if let Some(r) = master_ref {
             r
         } else {
-            bail!("Could not find 'main' or 'master' reference");
+            bail!("Could not find 'origin/main' or 'origin/master' reference");
         }
     };
     let main_commit = main_ref.peel_to_commit()?;
     trace!("Main branch is at commit {}", main_commit.id);
     let head = repository.head_commit()?;
     trace!("Current HEAD is at commit {}", head.id);
+
+    let head_parents = head.parent_ids().map(|p| p.detach()).collect::<Vec<_>>();
+
+    trace!("HEAD parents: {:?}", head_parents);
 
     // look for cache in the last 10 commits in the current branch.
     // if we are on main we look at the last 10 commits of main.
