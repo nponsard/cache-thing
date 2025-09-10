@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
 use flate2::{Compression, write::GzEncoder};
-use gix::ObjectId;
+use gix::{Commit, ObjectId, Repository, reference::head_id};
 use log::{debug, info, trace};
 
 use crate::storage_backend::StorageBackend;
@@ -139,8 +139,26 @@ fn get_backend() -> impl StorageBackend {
 fn current_key(prefix: &str, suffix: Option<String>) -> Result<String> {
     let repository = gix::discover(".")?;
     let head = repository.head_commit()?;
+    let mut head_id = head.id;
 
-    Ok(format_key(prefix, head.id, suffix))
+    let main_commit = main_commit(&repository)?;
+
+    // If we're in a merge/pull request, the head is a merge commit between main and the feature branch.
+    // We want to find the parent that is not main to use as the cache key.
+    if in_merge_request_ci() {
+        let parents = head.parent_ids().collect::<Vec<_>>();
+        if parents.len() > 1 {
+            for parent in &parents {
+                let parent_id = parent.detach();
+                if parent_id != main_commit.id {
+                    head_id = parent_id;
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(format_key(prefix, head_id, suffix))
 }
 
 fn format_key(prefix: &str, commit: ObjectId, suffix: Option<String>) -> String {
@@ -153,7 +171,61 @@ fn format_key(prefix: &str, commit: ObjectId, suffix: Option<String>) -> String 
 
 fn possible_restore_keys(prefix: &str, suffix: Option<String>) -> Result<Vec<String>> {
     let repository = gix::discover(".")?;
-    
+
+    let main_commit = main_commit(&repository)?;
+
+    let head = repository.head_commit()?;
+    trace!("Current HEAD is at commit {}", head.id);
+
+    let head_parents = head.parent_ids().map(|p| p.detach()).collect::<Vec<_>>();
+
+    trace!("HEAD parents: {:?}", head_parents);
+
+    // look for cache in the last 10 commits in the current branch.
+    // if we are on main we look at the last 10 commits of main.
+    let parent_commits = head.ancestors();
+    let parrent_commits = if head.id == main_commit.id {
+        parent_commits
+    } else {
+        parent_commits.with_boundary([main_commit.id])
+    };
+
+    let parent_commits_list = parrent_commits.all()?.take(10);
+
+    let mut keys = Vec::new();
+    for element in parent_commits_list {
+        let commit = element?.id;
+        trace!("Considering commit {:?}", commit);
+
+        if commit == main_commit.id {
+            // main commit will be added at the end
+            continue;
+        }
+
+        if suffix.is_some() {
+            keys.push(format_key(prefix, commit, suffix.clone()));
+        }
+        keys.push(format_key(prefix, commit, None));
+    }
+
+    if suffix.is_some() {
+        keys.push(format_key(prefix, main_commit.id, suffix));
+    }
+    keys.push(format_key(prefix, main_commit.id, None));
+    Ok(keys)
+}
+
+fn in_merge_request_ci() -> bool {
+    if let Ok(var) = std::env::var("GITHUB_REF")
+        && var.contains("refs/pull/")
+    {
+        true
+    } else {
+        false
+    }
+}
+
+fn main_commit(repository: &'_ Repository) -> Result<Commit<'_>> {
     // TODO: ability to set a different default branch
     let main_ref = repository.try_find_reference("origin/main")?;
     let mut main_ref = if let Some(r) = main_ref {
@@ -168,37 +240,5 @@ fn possible_restore_keys(prefix: &str, suffix: Option<String>) -> Result<Vec<Str
     };
     let main_commit = main_ref.peel_to_commit()?;
     trace!("Main branch is at commit {}", main_commit.id);
-    let head = repository.head_commit()?;
-    trace!("Current HEAD is at commit {}", head.id);
-
-    let head_parents = head.parent_ids().map(|p| p.detach()).collect::<Vec<_>>();
-
-    trace!("HEAD parents: {:?}", head_parents);
-
-    // look for cache in the last 10 commits in the current branch.
-    // if we are on main we look at the last 10 commits of main.
-    let parent_commits = head.ancestors().first_parent_only();
-    let parrent_commits = if head.id == main_commit.id {
-        parent_commits
-    } else {
-        parent_commits.with_boundary([main_commit.id])
-    };
-
-    let parent_commits_list = parrent_commits.all()?.take(10);
-
-    let mut keys = Vec::new();
-    for element in parent_commits_list {
-        let commit = element?.id;
-        trace!("Considering commit {:?}", commit);
-        if suffix.is_some() {
-            keys.push(format_key(prefix, commit, suffix.clone()));
-        }
-        keys.push(format_key(prefix, commit, None));
-    }
-
-    if suffix.is_some() {
-        keys.push(format_key(prefix, main_commit.id, suffix));
-    }
-    keys.push(format_key(prefix, main_commit.id, None));
-    Ok(keys)
+    Ok(main_commit)
 }
