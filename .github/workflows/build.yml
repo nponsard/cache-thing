@@ -8,6 +8,10 @@ on:
     branches:
       - main
 
+  schedule:
+    - cron: '0 5 * * *'
+
+
 jobs:
   build-test:
     runs-on: arc-runners-nponsard
@@ -40,4 +44,9 @@ jobs:
         run: cargo build --release
 
       - name: push cargo cache
+        if: github.event_name != 'schedule'
         run: ./cache-thing push --prefix build -f target -f /home/runner/.cargo
+
+      - name: push nightly cargo cache
+        if: github.event_name == 'schedule'
+        run: ./cache-thing push --prefix build -f target -f /home/runner/.cargo --fixed-key nightly
