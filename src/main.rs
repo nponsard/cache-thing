@@ -57,6 +57,12 @@ struct PullArgs {
     /// Optional suffix
     #[arg(short, long)]
     suffix: Option<String>,
+
+    /// Fallback key to use if no cache is found
+    /// For example pulling the cache of the nightly build
+    /// Fallback key will be checked befor the commit on the main branch
+    #[arg(long)]
+    fallback_key: Option<String>,
 }
 
 fn main() {
@@ -121,7 +127,8 @@ struct FileEntry {
 fn pull(args: &PullArgs) -> Result<i32> {
     let file_backend = get_backend();
 
-    let possible_keys = possible_restore_keys(&args.prefix, args.suffix.clone())?;
+    let possible_keys =
+        possible_restore_keys(&args.prefix, args.suffix.clone(), args.fallback_key.clone())?;
     let mut key = None;
     for k in possible_keys {
         trace!("Looking for cache with key {}", &k);
@@ -223,18 +230,26 @@ fn current_key(prefix: &str, suffix: Option<String>) -> Result<String> {
         }
     }
 
-    Ok(format_key(prefix, head_id, suffix))
+    Ok(format_cache_key(prefix, head_id, suffix))
 }
 
-fn format_key(prefix: &str, commit: ObjectId, suffix: Option<String>) -> String {
+fn format_cache_key(prefix: &str, commit: ObjectId, suffix: Option<String>) -> String {
+    format_cache_key_str(prefix, commit.to_string(), suffix)
+}
+
+fn format_cache_key_str(prefix: &str, key: String, suffix: Option<String>) -> String {
     if let Some(suffix) = suffix {
-        format!("{}-{}-{}", prefix, commit, suffix)
+        format!("{}-{}-{}", prefix, key, suffix)
     } else {
-        format!("{}-{}", prefix, commit)
+        format!("{}-{}", prefix, key)
     }
 }
 
-fn possible_restore_keys(prefix: &str, suffix: Option<String>) -> Result<Vec<String>> {
+fn possible_restore_keys(
+    prefix: &str,
+    suffix: Option<String>,
+    fallback_key: Option<String>,
+) -> Result<Vec<String>> {
     let repository = gix::discover(".")?;
 
     let main_commit = main_commit(&repository)?;
@@ -275,15 +290,26 @@ fn possible_restore_keys(prefix: &str, suffix: Option<String>) -> Result<Vec<Str
         }
 
         if suffix.is_some() {
-            keys.push(format_key(prefix, commit, suffix.clone()));
+            keys.push(format_cache_key(prefix, commit, suffix.clone()));
         }
-        keys.push(format_key(prefix, commit, None));
+        keys.push(format_cache_key(prefix, commit, None));
+    }
+
+    if let Some(fallback_key) = fallback_key {
+        if suffix.is_some() {
+            keys.push(format_cache_key_str(
+                prefix,
+                fallback_key.clone(),
+                suffix.clone(),
+            ));
+        }
+        keys.push(format_cache_key_str(prefix, fallback_key, None));
     }
 
     if suffix.is_some() {
-        keys.push(format_key(prefix, main_commit.id, suffix));
+        keys.push(format_cache_key(prefix, main_commit.id, suffix));
     }
-    keys.push(format_key(prefix, main_commit.id, None));
+    keys.push(format_cache_key(prefix, main_commit.id, None));
     Ok(keys)
 }
 
