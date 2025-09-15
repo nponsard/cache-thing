@@ -39,6 +39,10 @@ struct PushArgs {
     /// Optional suffix to append to the cache key
     #[arg(short, long)]
     suffix: Option<String>,
+
+    /// Replace the commit hash with a fixed key
+    #[arg(long)]
+    fixed_key: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -80,7 +84,11 @@ fn try_main() -> Result<i32> {
 fn push(args: &PushArgs) -> Result<i32> {
     let file_backend = get_backend();
 
-    let key = current_key(&args.prefix, args.suffix.clone())?;
+    let key = if let Some(fixed_key) = &args.fixed_key {
+        fixed_key.clone()
+    } else {
+        current_key(&args.prefix, args.suffix.clone())?
+    };
 
     info!("Storing cache with key {}", &key);
 
@@ -304,7 +312,7 @@ fn main_commit(repository: &'_ Repository) -> Result<Commit<'_>> {
     };
     let main_commit = main_ref.peel_to_commit()?;
     trace!("Main branch is at commit {}", main_commit.id);
-    
+
     Ok(main_commit)
 }
 
