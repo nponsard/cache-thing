@@ -91,7 +91,7 @@ fn push(args: &PushArgs) -> Result<i32> {
     let file_backend = get_backend();
 
     let key = if let Some(fixed_key) = &args.fixed_key {
-        fixed_key.clone()
+        format_cache_key_str(&args.prefix, fixed_key.clone(), args.suffix.clone())
     } else {
         current_key(&args.prefix, args.suffix.clone())?
     };
