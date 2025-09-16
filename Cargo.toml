@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
 
+[profile.release]
+opt-level = 3
+strip = "symbols"
+lto = "fat"
+
 [dependencies]
 anyhow = "1.0.99"
 base16ct = { version = "0.3.0", features = ["alloc"] }
