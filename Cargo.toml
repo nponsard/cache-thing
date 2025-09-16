@@ -10,7 +10,9 @@ base16ct = { version = "0.3.0", features = ["alloc"] }
 clap = { version = "4.5.45", features = ["derive"] }
 env_logger = "0.11.8"
 flate2 = "1.1.2"
-gix = "0.73.0"
+gix = { version = "0.73.0", default-features = false, features = [
+  "attributes",
+] }
 log = "0.4.27"
 sha2 = "0.10.9"
 tar = "0.4.44"
