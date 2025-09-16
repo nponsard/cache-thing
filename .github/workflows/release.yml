@@ -1,0 +1,34 @@
+permissions:
+  contents: write
+name: Build and push to Release page
+
+on:
+  release:
+    types: [created]
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    env:
+      FILE_NAME: cache-thing-${{ github.ref_name }}-x86_64-linux-musl
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl
+
+      - name: Build binary
+        run: cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: rename file
+        run: mv --verbose target/x86_64-unknown-linux-musl/release/cache-thing ${{ env.FILE_NAME }}
+
+      - name: Upload to the release
+        if: ${{ github.event_name == 'release' }}
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ env.FILE_NAME }}
