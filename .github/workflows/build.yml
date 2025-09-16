@@ -26,7 +26,16 @@ jobs:
         with:
           fetch-depth: 0
 
-      # this is a bit stupid, build itself to restore the cache, the retry the build
+      - name: Download cache-thing
+        run: |
+          mkdir -p ~/.local/bin
+          curl -sSL https://github.com/nponsard/cache-thing/releases/download/0.1.0/cache-thing-0.1.0-x86_64-linux-musl -o ~/.local/bin/cache-thing
+          chmod +x ~/.local/bin/cache-thing
+          
+      - name: Restore cache
+        run: ~/.local/bin/cache-thing pull --prefix build -f target -f /home/runner/.cargo || true
+
+      # Build the new version, use it to restore the cache, then build again
 
       - name: Build cache-thing
         run: cargo build --release
