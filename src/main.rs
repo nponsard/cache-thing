@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    io::{BufReader, BufWriter},
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
@@ -98,7 +101,7 @@ fn push(args: &PushArgs) -> Result<i32> {
 
     info!("Storing cache with key {}", &key);
 
-    let writer = file_backend.writer(&key)?;
+    let writer = BufWriter::new(file_backend.writer(&key)?);
     let encoder = GzEncoder::new(writer, Compression::default());
     let mut archive = tar::Builder::new(encoder);
     for file in &args.files {
@@ -160,7 +163,7 @@ fn pull(args: &PullArgs) -> Result<i32> {
         })
         .collect();
 
-    let reader = file_backend.reader(&key)?;
+    let reader = BufReader::new(file_backend.reader(&key)?);
     let decoder = flate2::read::GzDecoder::new(reader);
     let mut archive = tar::Archive::new(decoder);
 
