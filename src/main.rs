@@ -1,13 +1,13 @@
 use std::{
-    io::{BufReader, BufWriter},
+    io::{BufReader, BufWriter, Read},
     path::{Path, PathBuf},
 };
 
 use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
 use flate2::{Compression, write::GzEncoder};
-use gix::{Commit, ObjectId, Repository, hashtable::hash_map::HashMap, progress::prodash::warn};
-use log::{debug, info, trace};
+use gix::{Commit, ObjectId, Repository, hashtable::hash_map::HashMap};
+use log::{debug, info, trace, warn};
 use sha2::{Digest, Sha256};
 
 use crate::storage_backend::StorageBackend;
@@ -193,10 +193,8 @@ fn pull(args: &PullArgs) -> Result<i32> {
         }
     }
 
-    for (_, file_entry) in &file_etries {
-        if !file_entry.extracted {
-            warn!("File {} was asked but not found in cache", file_entry.path);
-        }
+    for (_, file_entry) in file_etries.iter().filter(|(_, e)| !e.extracted) {
+        warn!("Path {} was asked but not found in cache", file_entry.path);
     }
 
     Ok(0)
