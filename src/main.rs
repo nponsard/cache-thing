@@ -1,6 +1,9 @@
 use std::{
+    fs::{self, File, read_dir},
     io::{BufReader, BufWriter, Read},
+    os::{self, unix},
     path::{Path, PathBuf},
+    process,
 };
 
 use anyhow::{Result, bail};
@@ -10,7 +13,7 @@ use gix::{Commit, ObjectId, Repository, hashtable::hash_map::HashMap};
 use log::{debug, info, trace, warn};
 use sha2::{Digest, Sha256};
 
-use crate::storage_backend::StorageBackend;
+use crate::{folder_backend::hash_file_name, storage_backend::StorageBackend};
 
 mod folder_backend;
 pub mod storage_backend;
@@ -91,7 +94,7 @@ fn try_main() -> Result<i32> {
 }
 
 fn push(args: &PushArgs) -> Result<i32> {
-    let file_backend = get_backend();
+    let cache_dir = get_backend();
 
     let key = if let Some(fixed_key) = &args.fixed_key {
         format_cache_key_str(&args.prefix, fixed_key.clone(), args.suffix.clone())
@@ -99,24 +102,15 @@ fn push(args: &PushArgs) -> Result<i32> {
         current_key(&args.prefix, args.suffix.clone())?
     };
 
-    info!("Storing cache with key {}", &key);
+    info!("Marking cache as finished with key {}", &key);
 
-    let writer = BufWriter::new(file_backend.writer(&key)?);
-    let encoder = GzEncoder::new(writer, Compression::default());
-    let mut archive = tar::Builder::new(encoder);
-    for file in &args.files {
-        let stat = std::fs::metadata(file)?;
-        let hash = hash_from_path(file);
-        if stat.is_dir() {
-            trace!("Adding directory {} to archive", file);
-            archive.append_dir_all(hash, file)?;
-        } else {
-            trace!("Adding file {} to archive", file);
-            archive.append_path_with_name(file, hash)?;
-        }
-    }
+    // TODO: ability to rename to a custom key
 
-    archive.finish()?;
+    let finished_file = PathBuf::from(&cache_dir)
+        .join(hash_file_name(&key))
+        .join("finished");
+
+    File::create(finished_file)?;
 
     info!("Cache stored with key {}", &key);
     Ok(0)
@@ -128,14 +122,20 @@ struct FileEntry {
 }
 
 fn pull(args: &PullArgs) -> Result<i32> {
-    let file_backend = get_backend();
+    let volume_location = get_backend();
 
-    let possible_keys =
+    let possible_keys: Vec<String> =
         possible_restore_keys(&args.prefix, args.suffix.clone(), args.fallback_key.clone())?;
     let mut key = None;
     for k in possible_keys {
         trace!("Looking for cache with key {}", &k);
-        if file_backend.exists(&k)? {
+
+        // Checking for "finished" file, marking that the the cache is not being written to.
+        let file = PathBuf::from(&volume_location)
+            .join(hash_file_name(&k))
+            .join("finished");
+
+        if file.exists() {
             debug!("Found cache with key {}", &k);
             key = Some(k);
             break;
@@ -163,27 +163,40 @@ fn pull(args: &PullArgs) -> Result<i32> {
         })
         .collect();
 
-    let reader = BufReader::new(file_backend.reader(&key)?);
-    let decoder = flate2::read::GzDecoder::new(reader);
-    let mut archive = tar::Archive::new(decoder);
+    let previous_cache_directory = PathBuf::from(&volume_location).join(hash_file_name(&key));
 
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        let path = entry.path()?;
-        let components = path.components().collect::<Vec<_>>();
-        let hash = components.first().unwrap().as_os_str().to_string_lossy();
+    let current_key = current_key(&args.prefix, args.suffix.clone())?;
+    let current_cache_directory =
+        PathBuf::from(&volume_location).join(hash_file_name(&current_key));
+    let command_status = process::Command::new("btrfs")
+        .arg("subvolume")
+        .arg("snapshot")
+        .arg(previous_cache_directory)
+        .arg(current_cache_directory.clone())
+        .status()?;
 
-        if let Some(file_entry) = file_etries.get_mut(&hash.to_string()) {
-            let without_hash = components.iter().skip(1).collect::<PathBuf>();
-            let mut output_path = PathBuf::from(&file_entry.path);
-            output_path.push(&without_hash);
+    if !command_status.success() {
+        bail!("Could not create btrfs snapshot");
+    }
 
+    // Mark that we're working on this cache
+    fs::remove_file(current_cache_directory.join("finished"))?;
+
+    // TODO: create folders if it does not exist
+    for entry in read_dir(&current_cache_directory)? {
+        let entry = entry?;
+
+        let hash = entry.file_name().to_string_lossy().to_string();
+        let path = entry.path();
+
+        if let Some(file_entry) = file_etries.get_mut(&hash) {
+            let output_path = PathBuf::from(&file_entry.path);
+            unix::fs::symlink(&path, &output_path)?;
             trace!(
                 "Extracting file {} to {}",
                 path.to_string_lossy(),
                 output_path.to_string_lossy()
             );
-            entry.unpack(output_path)?;
             file_entry.extracted = true;
         } else {
             trace!(
@@ -200,13 +213,13 @@ fn pull(args: &PullArgs) -> Result<i32> {
     Ok(0)
 }
 
-fn get_backend() -> impl StorageBackend {
+fn get_backend() -> String {
     // TODO: storage backend selection
 
     let location =
         std::env::var("CACHE_THING_LOCATION").unwrap_or("/tmp/cache-thing/data".to_string());
 
-    folder_backend::FolderBackend::new(std::path::PathBuf::from(location))
+    location
 }
 
 fn current_key(prefix: &str, suffix: Option<String>) -> Result<String> {

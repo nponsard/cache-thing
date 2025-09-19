@@ -4,7 +4,7 @@ use std::fs::{File, OpenOptions};
 
 use crate::storage_backend::StorageBackend;
 
-fn hash_file_name(key: &str) -> String {
+pub fn hash_file_name(key: &str) -> String {
     let hash = Sha256::digest(key);
     base16ct::lower::encode_string(&hash)
 }
