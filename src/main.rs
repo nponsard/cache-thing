@@ -1,19 +1,17 @@
 use std::{
-    fs::{self, File, read_dir},
-    io::{BufReader, BufWriter, Read},
-    os::{self, unix},
+    fs::{self, File},
+    os::unix,
     path::{Path, PathBuf},
     process,
 };
 
 use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
-use flate2::{Compression, write::GzEncoder};
 use gix::{Commit, ObjectId, Repository, hashtable::hash_map::HashMap};
-use log::{debug, info, trace, warn};
+use log::{debug, info, trace};
 use sha2::{Digest, Sha256};
 
-use crate::{folder_backend::hash_file_name, storage_backend::StorageBackend};
+use crate::folder_backend::hash_file_name;
 
 mod folder_backend;
 pub mod storage_backend;
@@ -94,35 +92,53 @@ fn try_main() -> Result<i32> {
 }
 
 fn push(args: &PushArgs) -> Result<i32> {
-    let cache_dir = get_backend();
+    let cache_dir = get_cache_location();
 
-    let key = if let Some(fixed_key) = &args.fixed_key {
+    let commit_key = current_key(&args.prefix, args.suffix.clone())?;
+    let fixed_key = args.fixed_key.clone().map(|fixed_key| {
         format_cache_key_str(&args.prefix, fixed_key.clone(), args.suffix.clone())
-    } else {
-        current_key(&args.prefix, args.suffix.clone())?
-    };
+    });
+    info!(
+        "Marking cache as finished with key {}, fixed key: {:?}",
+        commit_key, &fixed_key
+    );
 
-    info!("Marking cache as finished with key {}", &key);
-
-    // TODO: ability to rename to a custom key
+    let current_cache = PathBuf::from(&cache_dir).join(hash_file_name(&commit_key));
 
     let finished_file = PathBuf::from(&cache_dir)
-        .join(hash_file_name(&key))
+        .join(hash_file_name(&commit_key))
         .join("finished");
 
     File::create(finished_file)?;
 
-    info!("Cache stored with key {}", &key);
+    if let Some(key) = fixed_key {
+        let fixed_cache = PathBuf::from(&cache_dir).join(hash_file_name(&key));
+
+        if fixed_cache.exists() {
+            fs::remove_dir_all(&fixed_cache)?;
+        }
+
+        let command_status = process::Command::new("btrfs")
+            .arg("subvolume")
+            .arg("snapshot")
+            .arg(current_cache)
+            .arg(fixed_cache.clone())
+            .status()?;
+
+        if !command_status.success() {
+            bail!("Could not create btrfs snapshot for fixed key");
+        }
+    }
+
     Ok(0)
 }
 
 struct FileEntry {
     pub path: String,
-    pub extracted: bool,
 }
 
 fn pull(args: &PullArgs) -> Result<i32> {
-    let volume_location = get_backend();
+    let volume_location = get_cache_location();
 
     let possible_keys: Vec<String> =
         possible_restore_keys(&args.prefix, args.suffix.clone(), args.fallback_key.clone())?;
@@ -148,18 +164,12 @@ fn pull(args: &PullArgs) -> Result<i32> {
         bail!("No cache found for prefix {}", &args.prefix);
     };
 
-    let mut file_etries: HashMap<String, FileEntry> = args
+    let directory_entries: HashMap<String, FileEntry> = args
         .files
         .iter()
         .map(|f| {
             let hash = hash_from_path(f);
-            (
-                hash.clone(),
-                FileEntry {
-                    path: f.clone(),
-                    extracted: false,
-                },
-            )
+            (hash.clone(), FileEntry { path: f.clone() })
         })
         .collect();
 
@@ -183,43 +193,29 @@ fn pull(args: &PullArgs) -> Result<i32> {
     fs::remove_file(current_cache_directory.join("finished"))?;
 
     // TODO: create folders if it does not exist
-    for entry in read_dir(&current_cache_directory)? {
-        let entry = entry?;
 
-        let hash = entry.file_name().to_string_lossy().to_string();
-        let path = entry.path();
+    for (hash, entry) in directory_entries {
+        let cache_path = PathBuf::from(&current_cache_directory).join(&hash);
 
-        if let Some(file_entry) = file_etries.get_mut(&hash) {
-            let output_path = PathBuf::from(&file_entry.path);
-            unix::fs::symlink(&path, &output_path)?;
-            trace!(
-                "Extracting file {} to {}",
-                path.to_string_lossy(),
-                output_path.to_string_lossy()
-            );
-            file_entry.extracted = true;
-        } else {
-            trace!(
-                "Skipping file {} (not in requested files)",
-                path.to_string_lossy()
-            );
+        if !cache_path.exists() {
+            fs::create_dir_all(&cache_path)?;
         }
-    }
-
-    for (_, file_entry) in file_etries.iter().filter(|(_, e)| !e.extracted) {
-        warn!("Path {} was asked but not found in cache", file_entry.path);
+        let output_path = PathBuf::from(&entry.path);
+        unix::fs::symlink(&cache_path, &output_path)?;
+        trace!(
+            "Symlink file {} to {}",
+            cache_path.to_string_lossy(),
+            output_path.to_string_lossy()
+        );
     }
 
     Ok(0)
 }
 
-fn get_backend() -> String {
+fn get_cache_location() -> String {
     // TODO: storage backend selection
 
-    let location =
-        std::env::var("CACHE_THING_LOCATION").unwrap_or("/tmp/cache-thing/data".to_string());
-
-    location
+    std::env::var("CACHE_THING_LOCATION").unwrap_or("/tmp/cache-thing/data".to_string())
 }
 
 fn current_key(prefix: &str, suffix: Option<String>) -> Result<String> {
