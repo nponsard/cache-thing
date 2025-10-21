@@ -91,6 +91,20 @@ fn try_main() -> Result<i32> {
     }
 }
 
+fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> Result<()> {
+    fs::create_dir_all(&dst)?;
+    for entry in fs::read_dir(src)? {
+        let dir_entry = entry?;
+        let ty = dir_entry.file_type()?;
+        if ty.is_dir() {
+            copy_dir_all(dir_entry.path(), dst.as_ref().join(dir_entry.file_name()))?;
+        } else {
+            fs::copy(dir_entry.path(), dst.as_ref().join(dir_entry.file_name()))?;
+        }
+    }
+    Ok(())
+}
+
 fn push(args: &PushArgs) -> Result<i32> {
     let cache_dir = get_cache_location();
 
@@ -105,6 +119,28 @@ fn push(args: &PushArgs) -> Result<i32> {
 
     let current_cache = PathBuf::from(&cache_dir).join(hash_file_name(&commit_key));
 
+    if !current_cache.exists() {
+        let command_status = process::Command::new("btrfs")
+            .arg("subvolume")
+            .arg("create")
+            .arg(current_cache.clone())
+            .status()?;
+        if !command_status.success() {
+            bail!("Could not create btrfs subvolume");
+        }
+
+        for file in &args.files {
+            let hash = hash_from_path(file);
+            let cache_path = current_cache.join(&hash);
+
+            if PathBuf::from(file).is_dir() {
+                copy_dir_all(file, &cache_path)?;
+            } else {
+                fs::copy(file, &cache_path)?;
+            }
+        }
+    }
+
     let finished_file = PathBuf::from(&cache_dir)
         .join(hash_file_name(&commit_key))
         .join("finished");
@@ -114,6 +150,7 @@ fn push(args: &PushArgs) -> Result<i32> {
     if let Some(key) = fixed_key {
         let fixed_cache = PathBuf::from(&cache_dir).join(hash_file_name(&key));
 
+        // May be faster to delete the subvolume.
         if fixed_cache.exists() {
             fs::remove_dir_all(&fixed_cache)?;
         }
