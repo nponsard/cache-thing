@@ -1,5 +1,5 @@
 use std::{
-    fs::{self, File},
+    fs::{self, File, create_dir_all},
     os::unix,
     path::{Path, PathBuf},
     process,
@@ -107,6 +107,7 @@ fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> Result<()> {
 
 fn push(args: &PushArgs) -> Result<i32> {
     let cache_dir = get_cache_location();
+    create_dir_all(PathBuf::from(&cache_dir))?;
 
     let commit_key = current_key(&args.prefix, args.suffix.clone())?;
     let fixed_key = args.fixed_key.clone().map(|fixed_key| {
@@ -215,6 +216,11 @@ fn pull(args: &PullArgs) -> Result<i32> {
     let current_key = current_key(&args.prefix, args.suffix.clone())?;
     let current_cache_directory =
         PathBuf::from(&volume_location).join(hash_file_name(&current_key));
+    
+    if current_cache_directory.exists() {
+        fs::remove_dir_all(&current_cache_directory)?;
+    }
+
     let command_status = process::Command::new("btrfs")
         .arg("subvolume")
         .arg("snapshot")
