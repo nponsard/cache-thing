@@ -1,12 +1,12 @@
 use std::{
-    io::{BufReader, BufWriter, Read},
+    io::{BufReader, BufWriter},
     path::{Path, PathBuf},
 };
 
 use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
 use flate2::{Compression, write::GzEncoder};
-use gix::{Commit, ObjectId, Repository, hashtable::hash_map::HashMap};
+use gix::{Commit, ObjectId, Repository, hashtable::hash_map::HashMap, prelude::ObjectIdExt};
 use log::{debug, info, trace, warn};
 use sha2::{Digest, Sha256};
 
@@ -209,12 +209,11 @@ fn get_backend() -> impl StorageBackend {
     folder_backend::FolderBackend::new(std::path::PathBuf::from(location))
 }
 
-fn current_key(prefix: &str, suffix: Option<String>) -> Result<String> {
-    let repository = gix::discover(".")?;
+fn get_real_branch_head(repository: &'_ Repository) -> Result<ObjectId> {
     let head = repository.head_commit()?;
     let mut head_id = head.id;
 
-    let main_commit = main_commit(&repository)?;
+    let main_commit = main_commit(repository)?;
 
     // If we're in a merge/pull request, the head is a merge commit between main and the feature branch.
     // We want to find the parent that is not main to use as the cache key.
@@ -230,7 +229,12 @@ fn current_key(prefix: &str, suffix: Option<String>) -> Result<String> {
             }
         }
     }
+    Ok(head_id)
+}
 
+fn current_key(prefix: &str, suffix: Option<String>) -> Result<String> {
+    let repository = gix::discover(".")?;
+    let head_id = get_real_branch_head(&repository)?;
     Ok(format_cache_key(prefix, head_id, suffix))
 }
 
@@ -268,19 +272,30 @@ fn possible_restore_keys(
     let head_parents = head.parent_ids().map(|p| p.detach()).collect::<Vec<_>>();
 
     trace!("HEAD parents: {:?}", head_parents);
+    let branch_head = get_real_branch_head(&repository)?;
 
-    // look for cache in the last 10 commits in the current branch.
-    // if we are on main we look at the last 10 commits of main.
-    let parent_commits = head.ancestors();
-    let parrent_commits = if head.id == main_commit.id {
-        parent_commits
-    } else {
-        parent_commits.with_boundary([main_commit.id])
-    };
+    // look for cache in the last 20 commits in the current branch.
+    let parent_commits = branch_head.attach(&repository).ancestors();
+    // let parent_commits = if head.id == main_commit.id {
+    //     parent_commits
+    // } else {
+    //     parent_commits.with_boundary([main_commit.id])
+    // };
 
-    let parent_commits_list = parrent_commits.all()?.take(10);
+    let parent_commits_list = parent_commits
+        .sorting(gix::revision::walk::Sorting::BreadthFirst)
+        .all()?
+        .take(20);
 
     let mut keys = Vec::new();
+
+    // Push current commit, just in case.
+    if suffix.is_some() {
+        keys.push(format_cache_key(prefix, branch_head, suffix.clone()));
+    }
+    keys.push(format_cache_key(prefix, branch_head, None));
+
+    // Go through parent commits
     for element in parent_commits_list {
         let commit = element?.id;
         trace!("Considering commit {:?}", commit);
