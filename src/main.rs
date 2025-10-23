@@ -355,16 +355,17 @@ fn possible_restore_keys(
 
     trace!("HEAD parents: {:?}", head_parents);
 
-    // look for cache in the last 10 commits in the current branch.
-    // if we are on main we look at the last 10 commits of main.
+    // look for cache in the last 20 commits in the current branch.
     let parent_commits = head.ancestors();
-    let parrent_commits = if head.id == main_commit.id {
-        parent_commits
-    } else {
-        parent_commits.with_boundary([main_commit.id])
-    };
+    // let parent_commits = if head.id == main_commit.id {
+    //     parent_commits
+    // } else {
+    //     parent_commits.with_boundary([main_commit.id])
+    // };
 
-    let parent_commits_list = parrent_commits.all()?.take(10);
+
+    // TODO: On PR builds, we need to first look at the commits in the branch that is the source of the PR. (Avoid looking at the main history)
+    let parent_commits_list = parent_commits.sorting(gix::revision::walk::Sorting::BreadthFirst).all()?.take(20);
 
     let mut keys = Vec::new();
     for element in parent_commits_list {
