@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
 use gix::{Commit, ObjectId, Repository, hashtable::hash_map::HashMap};
-use log::{debug, info, trace};
+use log::{debug, info, trace, warn};
 use sha2::{Digest, Sha256};
 
 use crate::folder_backend::hash_file_name;
@@ -256,19 +256,34 @@ fn pull(args: &PullArgs) -> Result<i32> {
 
         // we replace what was there before
         if output_path.exists() {
-            if output_path.is_file() {
-                fs::remove_file(&output_path)?;
+            let result = if output_path.is_file() {
+                fs::remove_file(&output_path)
             } else {
-                fs::remove_dir_all(&output_path)?;
+                fs::remove_dir_all(&output_path)
+            };
+            if let Err(e) = result {
+                warn!(
+                    "Could not remove existing file {}: {}",
+                    output_path.to_string_lossy(),
+                    e
+                );
             }
         }
 
-        unix::fs::symlink(&cache_path, &output_path)?;
+        let result = unix::fs::symlink(&cache_path, &output_path);
         trace!(
             "Symlink file {} to {}",
             cache_path.to_string_lossy(),
             output_path.to_string_lossy()
         );
+        if let Err(e) = result {
+            warn!(
+                "Could not create symlink from {} to {}: {}",
+                cache_path.to_string_lossy(),
+                output_path.to_string_lossy(),
+                e
+            );
+        }
     }
 
     Ok(0)
