@@ -91,19 +91,19 @@ fn try_main() -> Result<i32> {
     }
 }
 
-fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> Result<()> {
-    fs::create_dir_all(&dst)?;
-    for entry in fs::read_dir(src)? {
-        let dir_entry = entry?;
-        let ty = dir_entry.file_type()?;
-        if ty.is_dir() {
-            copy_dir_all(dir_entry.path(), dst.as_ref().join(dir_entry.file_name()))?;
-        } else {
-            fs::copy(dir_entry.path(), dst.as_ref().join(dir_entry.file_name()))?;
-        }
-    }
-    Ok(())
-}
+// fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> Result<()> {
+//     fs::create_dir_all(&dst)?;
+//     for entry in fs::read_dir(src)? {
+//         let dir_entry = entry?;
+//         let ty = dir_entry.file_type()?;
+//         if ty.is_dir() {
+//             copy_dir_all(dir_entry.path(), dst.as_ref().join(dir_entry.file_name()))?;
+//         } else {
+//             fs::copy(dir_entry.path(), dst.as_ref().join(dir_entry.file_name()))?;
+//         }
+//     }
+//     Ok(())
+// }
 
 fn push(args: &PushArgs) -> Result<i32> {
     let cache_dir = get_cache_location();
@@ -134,10 +134,19 @@ fn push(args: &PushArgs) -> Result<i32> {
             let hash = hash_from_path(file);
             let cache_path = current_cache.join(&hash);
 
-            if PathBuf::from(file).is_dir() {
-                copy_dir_all(file, &cache_path)?;
-            } else {
-                fs::copy(file, &cache_path)?;
+            // if PathBuf::from(file).is_dir() {
+            //     copy_dir_all(file, &cache_path)?;
+            // } else {
+            //     fs::copy(file, &cache_path)?;
+            // }
+
+            let command_status = process::Command::new("cp")
+                .arg("-r")
+                .arg(file)
+                .arg(&cache_path)
+                .status()?;
+            if !command_status.success() {
+                bail!("Could not copy file {} to cache", file);
             }
         }
     }
@@ -216,7 +225,7 @@ fn pull(args: &PullArgs) -> Result<i32> {
     let current_key = current_key(&args.prefix, args.suffix.clone())?;
     let current_cache_directory =
         PathBuf::from(&volume_location).join(hash_file_name(&current_key));
-    
+
     if current_cache_directory.exists() {
         fs::remove_dir_all(&current_cache_directory)?;
     }
