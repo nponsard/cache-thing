@@ -253,6 +253,16 @@ fn pull(args: &PullArgs) -> Result<i32> {
             fs::create_dir_all(&cache_path)?;
         }
         let output_path = PathBuf::from(&entry.path);
+
+        // we replace what was there before
+        if output_path.exists() {
+            if output_path.is_file() {
+                fs::remove_file(&output_path)?;
+            } else {
+                fs::remove_dir_all(&output_path)?;
+            }
+        }
+
         unix::fs::symlink(&cache_path, &output_path)?;
         trace!(
             "Symlink file {} to {}",
