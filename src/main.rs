@@ -28,6 +28,8 @@ struct Cli {
 enum Commands {
     Push(PushArgs),
     Pull(PullArgs),
+    /// Clean the changes made to the cache.
+    Clean(CleanArgs),
 }
 
 #[derive(Debug, Args)]
@@ -69,6 +71,17 @@ struct PullArgs {
     fallback_key: Option<String>,
 }
 
+#[derive(Debug, Args)]
+struct CleanArgs {
+    /// Name of the cache, to differentiate if multiple are stored in the same backend
+    #[arg(short, long)]
+    prefix: String,
+
+    /// Optional suffix
+    #[arg(short, long)]
+    suffix: Option<String>,
+}
+
 fn main() {
     let exit_code = match try_main() {
         Ok(code) => code,
@@ -88,6 +101,7 @@ fn try_main() -> Result<i32> {
     match &args.command {
         Commands::Push(push_args) => push(push_args),
         Commands::Pull(pull_args) => pull(pull_args),
+        Commands::Clean(clean_args) => clean(clean_args),
     }
 }
 
@@ -104,6 +118,27 @@ fn try_main() -> Result<i32> {
 //     }
 //     Ok(())
 // }
+
+fn clean(args: &CleanArgs) -> Result<i32> {
+    let cache_dir = get_cache_location();
+    create_dir_all(PathBuf::from(&cache_dir))?;
+
+    let commit_key = current_key(&args.prefix, args.suffix.clone())?;
+
+    info!("Cleaning up cache with key {}", commit_key);
+
+    let current_cache = PathBuf::from(&cache_dir).join(hash_file_name(&commit_key));
+
+    if !current_cache.exists() {
+        info!("Cache does not exist, nothing to clean");
+        return Ok(0);
+    }
+
+    fs::remove_dir_all(&current_cache)?;
+
+    info!("Cache cleaned successfully");
+    Ok(0)
+}
 
 fn push(args: &PushArgs) -> Result<i32> {
     let cache_dir = get_cache_location();
