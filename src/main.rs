@@ -186,11 +186,22 @@ fn push(args: &PushArgs) -> Result<i32> {
         }
     }
 
-    let finished_file = PathBuf::from(&cache_dir)
-        .join(hash_file_name(&commit_key))
-        .join("finished");
+    let finished_file = current_cache.join("finished");
 
     File::create(finished_file)?;
+
+    // Mark read-only
+    let command_status = process::Command::new("btrfs")
+        .arg("property")
+        .arg("set")
+        .arg(&current_cache)
+        .arg("ro")
+        .arg("true")
+        .status()?;
+
+    if !command_status.success() {
+        warn!("Failed to mark subvolume as read-only");
+    }
 
     if let Some(key) = fixed_key {
         let fixed_cache = PathBuf::from(&cache_dir).join(hash_file_name(&key));
@@ -203,6 +214,7 @@ fn push(args: &PushArgs) -> Result<i32> {
         let command_status = process::Command::new("btrfs")
             .arg("subvolume")
             .arg("snapshot")
+            .arg("-r")
             .arg(current_cache)
             .arg(fixed_cache.clone())
             .status()?;
