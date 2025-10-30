@@ -49,6 +49,10 @@ struct PushArgs {
     /// Replace the commit hash with a fixed key
     #[arg(long)]
     fixed_key: Option<String>,
+
+    /// Only store the fixed key, not the commit key
+    #[arg(long)]
+    only_fixed_key: bool,
 }
 
 #[derive(Debug, Args)]
@@ -134,7 +138,14 @@ fn clean(args: &CleanArgs) -> Result<i32> {
         return Ok(0);
     }
 
-    fs::remove_dir_all(&current_cache)?;
+    let command_status = process::Command::new("btrfs")
+        .arg("subvolume")
+        .arg("delete")
+        .arg(&current_cache)
+        .status()?;
+    if !command_status.success() {
+        warn!("couldn't delete cache volume");
+    }
 
     info!("Cache cleaned successfully");
     Ok(0)
@@ -215,12 +226,23 @@ fn push(args: &PushArgs) -> Result<i32> {
             .arg("subvolume")
             .arg("snapshot")
             .arg("-r")
-            .arg(current_cache)
+            .arg(&current_cache)
             .arg(fixed_cache.clone())
             .status()?;
 
         if !command_status.success() {
             bail!("Could not create btrfs snapshot for fixed key");
+        }
+
+        if args.only_fixed_key {
+            let command_status = process::Command::new("btrfs")
+                .arg("subvolume")
+                .arg("delete")
+                .arg(&current_cache)
+                .status()?;
+            if !command_status.success() {
+                warn!("only-fixed-key: couldn't delete commit key");
+            }
         }
     }
 
