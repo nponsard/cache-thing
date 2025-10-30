@@ -5,16 +5,18 @@ use std::{
     process,
 };
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use gix::{Commit, ObjectId, Repository, hashtable::hash_map::HashMap, prelude::ObjectIdExt};
 use log::{debug, info, trace, warn};
 use sha2::{Digest, Sha256};
 
-use crate::folder_backend::hash_file_name;
+use crate::{folder_backend::hash_file_name, sharing::fetch_btrfs_volume_from_s3};
 
 mod folder_backend;
 pub mod storage_backend;
+
+mod sharing;
 
 #[derive(Debug, Parser)]
 #[command(name = "cache-thing")]
@@ -30,6 +32,8 @@ enum Commands {
     Pull(PullArgs),
     /// Clean the changes made to the cache.
     Clean(CleanArgs),
+    /// Fetch from S3
+    Fetch(FetchArgs),
 }
 
 #[derive(Debug, Args)]
@@ -53,6 +57,10 @@ struct PushArgs {
     /// Only store the fixed key, not the commit key
     #[arg(long)]
     only_fixed_key: bool,
+
+    /// Also push to configured S3 (using fixed key)
+    #[arg(long)]
+    also_to_s3_fixed_key: bool,
 }
 
 #[derive(Debug, Args)]
@@ -86,8 +94,24 @@ struct CleanArgs {
     suffix: Option<String>,
 }
 
-fn main() {
-    let exit_code = match try_main() {
+#[derive(Debug, Args)]
+struct FetchArgs {
+    /// Name of the cache, to differentiate if multiple are stored in the same backend
+    #[arg(short, long)]
+    prefix: String,
+
+    /// Optional suffix
+    #[arg(short, long)]
+    suffix: Option<String>,
+
+    /// Fixed key
+    #[arg(long)]
+    fixed_key: String,
+}
+
+#[tokio::main]
+async fn main() {
+    let exit_code = match try_main().await {
         Ok(code) => code,
         Err(err) => {
             eprintln!("error: {err}");
@@ -97,15 +121,16 @@ fn main() {
     std::process::exit(exit_code);
 }
 
-fn try_main() -> Result<i32> {
+async fn try_main() -> Result<i32> {
     env_logger::init();
 
     let args = Cli::parse();
 
     match &args.command {
-        Commands::Push(push_args) => push(push_args),
+        Commands::Push(push_args) => push(push_args).await,
         Commands::Pull(pull_args) => pull(pull_args),
         Commands::Clean(clean_args) => clean(clean_args),
+        Commands::Fetch(fetch_args) => fetch(fetch_args).await,
     }
 }
 
@@ -122,6 +147,27 @@ fn try_main() -> Result<i32> {
 //     }
 //     Ok(())
 // }
+async fn fetch(args: &FetchArgs) -> Result<i32> {
+    let fixed_key = format_cache_key_str(&args.prefix, args.fixed_key.clone(), args.suffix.clone());
+    let root = PathBuf::from(get_cache_location());
+
+    let fixed_cache = root.join(hash_file_name(&fixed_key));
+
+    if fixed_cache.exists() {
+        let command_status = process::Command::new("btrfs")
+            .arg("subvolume")
+            .arg("delete")
+            .arg(&fixed_cache)
+            .status()?;
+
+        if !command_status.success() {
+            warn!("coudn't delete suvolume");
+        }
+    }
+
+    fetch_btrfs_volume_from_s3(root, &fixed_key).await?;
+    Ok(0)
+}
 
 fn clean(args: &CleanArgs) -> Result<i32> {
     let cache_dir = get_cache_location();
@@ -151,7 +197,7 @@ fn clean(args: &CleanArgs) -> Result<i32> {
     Ok(0)
 }
 
-fn push(args: &PushArgs) -> Result<i32> {
+async fn push(args: &PushArgs) -> Result<i32> {
     let cache_dir = get_cache_location();
     create_dir_all(PathBuf::from(&cache_dir))?;
 
@@ -214,8 +260,8 @@ fn push(args: &PushArgs) -> Result<i32> {
         warn!("Failed to mark subvolume as read-only");
     }
 
-    if let Some(key) = fixed_key {
-        let fixed_cache = PathBuf::from(&cache_dir).join(hash_file_name(&key));
+    if let Some(ref key) = fixed_key {
+        let fixed_cache = PathBuf::from(&cache_dir).join(hash_file_name(key));
 
         // May be faster to delete the subvolume.
         if fixed_cache.exists() {
@@ -233,7 +279,6 @@ fn push(args: &PushArgs) -> Result<i32> {
         if !command_status.success() {
             bail!("Could not create btrfs snapshot for fixed key");
         }
-
         if args.only_fixed_key {
             let command_status = process::Command::new("btrfs")
                 .arg("subvolume")
@@ -243,6 +288,12 @@ fn push(args: &PushArgs) -> Result<i32> {
             if !command_status.success() {
                 warn!("only-fixed-key: couldn't delete commit key");
             }
+        }
+
+        if args.also_to_s3_fixed_key {
+            sharing::push_btrfs_volume_to_s3(fixed_cache.clone(), key)
+                .await
+                .context("pushing to s3")?;
         }
     }
 

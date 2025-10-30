@@ -19,5 +19,9 @@ gix = { version = "0.73.0", default-features = false, features = [
   "attributes",
 ] }
 log = "0.4.27"
+object_store = { version = "0.12.4", features = ["aws"] }
 sha2 = "0.10.9"
 tar = "0.4.44"
+
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7.16"
