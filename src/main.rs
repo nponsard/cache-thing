@@ -213,6 +213,8 @@ async fn push(args: &PushArgs) -> Result<i32> {
     let current_cache = PathBuf::from(&cache_dir).join(hash_file_name(&commit_key));
 
     if !current_cache.exists() {
+        debug!("Creating volumee: {:?}", current_cache);
+
         let command_status = process::Command::new("btrfs")
             .arg("subvolume")
             .arg("create")
@@ -222,7 +224,9 @@ async fn push(args: &PushArgs) -> Result<i32> {
             bail!("Could not create btrfs subvolume");
         }
 
+        debug!("Copying files to newly created volume");
         for file in &args.files {
+            trace!("Copying {}", file);
             let hash = hash_from_path(file);
             let cache_path = current_cache.join(&hash);
 
@@ -236,7 +240,8 @@ async fn push(args: &PushArgs) -> Result<i32> {
                 .arg("-r")
                 .arg(file)
                 .arg(&cache_path)
-                .status()?;
+                .status()
+                .context("Copying file using cp")?;
             if !command_status.success() {
                 bail!("Could not copy file {} to cache", file);
             }
@@ -245,8 +250,10 @@ async fn push(args: &PushArgs) -> Result<i32> {
 
     let finished_file = current_cache.join("finished");
 
-    File::create(finished_file)?;
+    debug!("Touching finished file");
+    File::create(finished_file).context("Touching finished file")?;
 
+    debug!("Marking subvolume as read-only");
     // Mark read-only
     let command_status = process::Command::new("btrfs")
         .arg("property")
@@ -254,7 +261,8 @@ async fn push(args: &PushArgs) -> Result<i32> {
         .arg(&current_cache)
         .arg("ro")
         .arg("true")
-        .status()?;
+        .status()
+        .context("Making subvolume read-only")?;
 
     if !command_status.success() {
         warn!("Failed to mark subvolume as read-only");
@@ -263,9 +271,16 @@ async fn push(args: &PushArgs) -> Result<i32> {
     if let Some(ref key) = fixed_key {
         let fixed_cache = PathBuf::from(&cache_dir).join(hash_file_name(key));
 
-        // May be faster to delete the subvolume.
         if fixed_cache.exists() {
-            fs::remove_dir_all(&fixed_cache)?;
+            let status = process::Command::new("btrfs")
+                .arg("subvolume")
+                .arg("delete")
+                .arg(&fixed_cache)
+                .status()
+                .context("Deleting old fixed key subvolume")?;
+            if !status.success() {
+                bail!("Failed to delete fixed key subvolume")
+            }
         }
 
         let command_status = process::Command::new("btrfs")
