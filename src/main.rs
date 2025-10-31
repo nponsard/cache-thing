@@ -155,6 +155,20 @@ async fn fetch(args: &FetchArgs) -> Result<i32> {
 
     if fixed_cache.exists() {
         let command_status = process::Command::new("btrfs")
+            .arg("property")
+            .arg("set")
+            .arg("-f")
+            .arg(&fixed_cache)
+            .arg("ro")
+            .arg("false")
+            .status()
+            .context("Making subvolume not read-only")?;
+
+        if !command_status.success() {
+            warn!("Failed to mark subvolume as read-only off");
+        }
+
+        let command_status = process::Command::new("btrfs")
             .arg("subvolume")
             .arg("delete")
             .arg(&fixed_cache)
@@ -275,6 +289,7 @@ async fn push(args: &PushArgs) -> Result<i32> {
             let command_status = process::Command::new("btrfs")
                 .arg("property")
                 .arg("set")
+                .arg("-f")
                 .arg(&fixed_cache)
                 .arg("ro")
                 .arg("false")
@@ -312,6 +327,7 @@ async fn push(args: &PushArgs) -> Result<i32> {
             let command_status = process::Command::new("btrfs")
                 .arg("property")
                 .arg("set")
+                .arg("-f")
                 .arg(&current_cache)
                 .arg("ro")
                 .arg("false")
