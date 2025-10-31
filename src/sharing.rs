@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow};
-use log::debug;
+use log::{debug, info};
 use object_store::{ObjectStore, aws::AmazonS3Builder, buffered::BufWriter};
 use std::{env, path::PathBuf, process::Stdio, sync::Arc};
 use tokio::{
@@ -41,7 +41,11 @@ pub async fn push_btrfs_volume_to_s3(volume: PathBuf, key: &str) -> Result<()> {
 
     let mut object_writer = BufWriter::new(s3, object_path);
     debug!("Starting pipe copy");
-    io::copy(&mut stdout, &mut object_writer).await?;
+
+    let (a, b) = tokio::join!(io::copy(&mut stdout, &mut object_writer), send.wait());
+
+    info!("copy: {:?}, send: {:?}", a, b);
+
     Ok(())
 }
 
