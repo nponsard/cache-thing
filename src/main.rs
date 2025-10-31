@@ -272,6 +272,19 @@ async fn push(args: &PushArgs) -> Result<i32> {
         let fixed_cache = PathBuf::from(&cache_dir).join(hash_file_name(key));
 
         if fixed_cache.exists() {
+            let command_status = process::Command::new("btrfs")
+                .arg("property")
+                .arg("set")
+                .arg(&fixed_cache)
+                .arg("ro")
+                .arg("false")
+                .status()
+                .context("Making subvolume not read-only")?;
+
+            if !command_status.success() {
+                warn!("Failed to mark subvolume as read-only off");
+            }
+
             let status = process::Command::new("btrfs")
                 .arg("subvolume")
                 .arg("delete")
@@ -295,6 +308,19 @@ async fn push(args: &PushArgs) -> Result<i32> {
             bail!("Could not create btrfs snapshot for fixed key");
         }
         if args.only_fixed_key {
+            let command_status = process::Command::new("btrfs")
+                .arg("property")
+                .arg("set")
+                .arg(&current_cache)
+                .arg("ro")
+                .arg("false")
+                .status()
+                .context("Making subvolume not read-only")?;
+
+            if !command_status.success() {
+                warn!("Failed to mark subvolume as read-only off");
+            }
+
             let command_status = process::Command::new("btrfs")
                 .arg("subvolume")
                 .arg("delete")
