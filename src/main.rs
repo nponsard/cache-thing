@@ -308,6 +308,7 @@ async fn push(args: &PushArgs) -> Result<i32> {
             bail!("Could not create btrfs snapshot for fixed key");
         }
         if args.only_fixed_key {
+            debug!("Deleding current commit subvolume");
             let command_status = process::Command::new("btrfs")
                 .arg("property")
                 .arg("set")
@@ -330,7 +331,7 @@ async fn push(args: &PushArgs) -> Result<i32> {
                 warn!("only-fixed-key: couldn't delete commit key");
             }
         }
-
+        debug!("Pushing to s3: {}", args.also_to_s3_fixed_key);
         if args.also_to_s3_fixed_key {
             sharing::push_btrfs_volume_to_s3(fixed_cache.clone(), key)
                 .await

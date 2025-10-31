@@ -1,7 +1,7 @@
-use std::{env, path::PathBuf, process::Stdio, sync::Arc};
-
 use anyhow::{Context, Result, anyhow};
+use log::debug;
 use object_store::{ObjectStore, aws::AmazonS3Builder, buffered::BufWriter};
+use std::{env, path::PathBuf, process::Stdio, sync::Arc};
 use tokio::{
     io::{self},
     process::Command,
@@ -26,6 +26,7 @@ fn build_s3_config_from_env() -> Result<object_store::aws::AmazonS3> {
 }
 
 pub async fn push_btrfs_volume_to_s3(volume: PathBuf, key: &str) -> Result<()> {
+    debug!("Sending btrfs volume");
     let s3 = Arc::new(build_s3_config_from_env()?);
 
     let mut send = Command::new("btrfs")
@@ -39,6 +40,7 @@ pub async fn push_btrfs_volume_to_s3(volume: PathBuf, key: &str) -> Result<()> {
     let object_path = object_store::path::Path::from_url_path(format!("/{key}"))?;
 
     let mut object_writer = BufWriter::new(s3, object_path);
+    debug!("Starting pipe copy");
     io::copy(&mut stdout, &mut object_writer).await?;
     Ok(())
 }
