@@ -1,5 +1,6 @@
 use std::{
     fs::{self, File, create_dir_all},
+    os::unix,
     path::{Path, PathBuf},
     process,
 };
@@ -445,8 +446,8 @@ fn pull(args: &PullArgs) -> Result<i32> {
         //         .stdout,
         // )
         // .to_string();
-        let result = std::fs::hard_link(&cache_entry_path, &output_path);
-        // let result = unix::fs::symlink(&cache_entry_path, &output_path);
+        // let result = std::fs::hard_link(&cache_entry_path, &output_path);
+        let result = unix::fs::symlink(&cache_entry_path, &output_path);
         trace!(
             "Symlink file {} to {}",
             cache_entry_path.to_string_lossy(),
