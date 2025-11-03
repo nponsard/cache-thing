@@ -1,6 +1,5 @@
 use std::{
     fs::{self, File, create_dir_all},
-    os::unix,
     path::{Path, PathBuf},
     process,
 };
@@ -341,12 +340,6 @@ fn pull(args: &PullArgs) -> Result<i32> {
         }
     }
 
-    let key = if let Some(k) = key {
-        k
-    } else {
-        bail!("No cache found for prefix {}", &args.prefix);
-    };
-
     let directory_entries: HashMap<String, FileEntry> = args
         .files
         .iter()
@@ -356,37 +349,78 @@ fn pull(args: &PullArgs) -> Result<i32> {
         })
         .collect();
 
-    let previous_cache_directory = PathBuf::from(&volume_location).join(hash_file_name(&key));
+    let previous_cache_volume =
+        key.map(|k| PathBuf::from(&volume_location).join(hash_file_name(&k)));
 
     let current_key = current_key(&args.prefix, args.suffix.clone())?;
-    let current_cache_directory =
-        PathBuf::from(&volume_location).join(hash_file_name(&current_key));
+    let current_cache_volume = PathBuf::from(&volume_location).join(hash_file_name(&current_key));
 
-    if current_cache_directory.exists() {
-        fs::remove_dir_all(&current_cache_directory)?;
+    if current_cache_volume.exists() {
+        set_subvolume_readonly(&current_cache_volume, false)?;
+        delete_subvolume(&current_cache_volume)?;
     }
 
-    let command_status = snapshot_subvolume(previous_cache_directory, &current_cache_directory)?;
+    match previous_cache_volume {
+        Some(ref previous) => {
+            let command_status = snapshot_subvolume(previous, &current_cache_volume)?;
 
-    if !command_status.success() {
-        bail!("Could not create btrfs snapshot");
+            if !command_status.success() {
+                bail!("Could not create btrfs snapshot");
+            }
+            // Mark that we're working on this cache
+            fs::remove_file(current_cache_volume.join("finished"))?;
+        }
+        None => {
+            let command_status = create_subvolume(&current_cache_volume)?;
+            if !command_status.success() {
+                bail!(
+                    "Failed to create subvolume {}",
+                    current_cache_volume.to_string_lossy()
+                );
+            }
+        }
     }
 
-    // Mark that we're working on this cache
-    fs::remove_file(current_cache_directory.join("finished"))?;
-
-    // TODO: create folders if it does not exist
+    // DEPENDENCY ON findmnt
+    // Get what device the btrfs volume is mounted from
+    // let btrfs_device = String::from_utf8_lossy(
+    //     &process::Command::new("findmnt")
+    //         .arg("-v")
+    //         .arg("-n")
+    //         .arg("-o")
+    //         .arg("SOURCE")
+    //         .arg("--target")
+    //         .arg(&volume_location)
+    //         .output()?
+    //         .stdout,
+    // )
+    // .to_string();
 
     for (hash, entry) in directory_entries {
-        let cache_path = PathBuf::from(&current_cache_directory).join(&hash);
+        let cache_entry_path = PathBuf::from(&current_cache_volume).join(&hash);
 
-        if !cache_path.exists() {
-            fs::create_dir_all(&cache_path)?;
+        if !cache_entry_path.exists() {
+            // create_subvolume(&cache_entry_path)?;
+            fs::create_dir_all(&cache_entry_path)?;
         }
         let output_path = PathBuf::from(&entry.path);
 
         // we replace what was there before
         if output_path.exists() {
+            // if we are creating the cache, populate it with the existing content
+            if previous_cache_volume.is_none() {
+                let res = process::Command::new("cp")
+                    .arg("-r")
+                    // Add a . to copy all files including hidden files but avoids creating a subfolder at the destination
+                    .arg(output_path.join("."))
+                    .arg(&cache_entry_path)
+                    .status()?;
+                if !res.success() {
+                    warn!("Copying existing files failed");
+                }
+            }
+
+            // This may get removed, we're assuming it's a directory at other places
             let result = if output_path.is_file() {
                 fs::remove_file(&output_path)
             } else {
@@ -401,16 +435,27 @@ fn pull(args: &PullArgs) -> Result<i32> {
             }
         }
 
-        let result = unix::fs::symlink(&cache_path, &output_path);
+        // get the subvolume id to mount
+        // let subvolid = String::from_utf8_lossy(
+        //     &process::Command::new("btrfs")
+        //         .arg("inspect-internal")
+        //         .arg("rootid")
+        //         .arg(&cache_entry_path)
+        //         .output()?
+        //         .stdout,
+        // )
+        // .to_string();
+        let result = std::fs::hard_link(&cache_entry_path, &output_path);
+        // let result = unix::fs::symlink(&cache_entry_path, &output_path);
         trace!(
             "Symlink file {} to {}",
-            cache_path.to_string_lossy(),
+            cache_entry_path.to_string_lossy(),
             output_path.to_string_lossy()
         );
         if let Err(e) = result {
             warn!(
                 "Could not create symlink from {} to {}: {}",
-                cache_path.to_string_lossy(),
+                cache_entry_path.to_string_lossy(),
                 output_path.to_string_lossy(),
                 e
             );
