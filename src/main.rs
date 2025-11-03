@@ -11,8 +11,13 @@ use gix::{Commit, ObjectId, Repository, hashtable::hash_map::HashMap, prelude::O
 use log::{debug, info, trace, warn};
 use sha2::{Digest, Sha256};
 
-use crate::{folder_backend::hash_file_name, sharing::fetch_btrfs_volume_from_s3};
+use crate::{
+    btrfs::{create_subvolume, delete_subvolume, set_subvolume_readonly, snapshot_subvolume},
+    folder_backend::hash_file_name,
+    sharing::fetch_btrfs_volume_from_s3,
+};
 
+mod btrfs;
 mod folder_backend;
 pub mod storage_backend;
 
@@ -154,25 +159,14 @@ async fn fetch(args: &FetchArgs) -> Result<i32> {
     let fixed_cache = root.join(hash_file_name(&fixed_key));
 
     if fixed_cache.exists() {
-        let command_status = process::Command::new("btrfs")
-            .arg("property")
-            .arg("set")
-            .arg("-f")
-            .arg(&fixed_cache)
-            .arg("ro")
-            .arg("false")
-            .status()
+        let command_status = set_subvolume_readonly(&fixed_cache, false)
             .context("Making subvolume not read-only")?;
 
         if !command_status.success() {
             warn!("Failed to mark subvolume as read-only off");
         }
 
-        let command_status = process::Command::new("btrfs")
-            .arg("subvolume")
-            .arg("delete")
-            .arg(&fixed_cache)
-            .status()?;
+        let command_status = delete_subvolume(&fixed_cache)?;
 
         if !command_status.success() {
             warn!("coudn't delete suvolume");
@@ -198,11 +192,7 @@ fn clean(args: &CleanArgs) -> Result<i32> {
         return Ok(0);
     }
 
-    let command_status = process::Command::new("btrfs")
-        .arg("subvolume")
-        .arg("delete")
-        .arg(&current_cache)
-        .status()?;
+    let command_status = delete_subvolume(&current_cache)?;
     if !command_status.success() {
         warn!("couldn't delete cache volume");
     }
@@ -229,11 +219,7 @@ async fn push(args: &PushArgs) -> Result<i32> {
     if !current_cache.exists() {
         debug!("Creating volumee: {:?}", current_cache);
 
-        let command_status = process::Command::new("btrfs")
-            .arg("subvolume")
-            .arg("create")
-            .arg(current_cache.clone())
-            .status()?;
+        let command_status = create_subvolume(&current_cache)?;
         if !command_status.success() {
             bail!("Could not create btrfs subvolume");
         }
@@ -269,14 +255,8 @@ async fn push(args: &PushArgs) -> Result<i32> {
 
     debug!("Marking subvolume as read-only");
     // Mark read-only
-    let command_status = process::Command::new("btrfs")
-        .arg("property")
-        .arg("set")
-        .arg(&current_cache)
-        .arg("ro")
-        .arg("true")
-        .status()
-        .context("Making subvolume read-only")?;
+    let command_status =
+        set_subvolume_readonly(&current_cache, true).context("Making subvolume read-only")?;
 
     if !command_status.success() {
         warn!("Failed to mark subvolume as read-only");
@@ -286,26 +266,15 @@ async fn push(args: &PushArgs) -> Result<i32> {
         let fixed_cache = PathBuf::from(&cache_dir).join(hash_file_name(key));
 
         if fixed_cache.exists() {
-            let command_status = process::Command::new("btrfs")
-                .arg("property")
-                .arg("set")
-                .arg("-f")
-                .arg(&fixed_cache)
-                .arg("ro")
-                .arg("false")
-                .status()
+            let command_status = set_subvolume_readonly(&fixed_cache, false)
                 .context("Making subvolume not read-only")?;
 
             if !command_status.success() {
                 warn!("Failed to mark subvolume as read-only off");
             }
 
-            let status = process::Command::new("btrfs")
-                .arg("subvolume")
-                .arg("delete")
-                .arg(&fixed_cache)
-                .status()
-                .context("Deleting old fixed key subvolume")?;
+            let status =
+                delete_subvolume(&fixed_cache).context("Deleting old fixed key subvolume")?;
             if !status.success() {
                 bail!("Failed to delete fixed key subvolume")
             }
@@ -324,25 +293,14 @@ async fn push(args: &PushArgs) -> Result<i32> {
         }
         if args.only_fixed_key {
             debug!("Deleding current commit subvolume");
-            let command_status = process::Command::new("btrfs")
-                .arg("property")
-                .arg("set")
-                .arg("-f")
-                .arg(&current_cache)
-                .arg("ro")
-                .arg("false")
-                .status()
+            let command_status = set_subvolume_readonly(&current_cache, false)
                 .context("Making subvolume not read-only")?;
 
             if !command_status.success() {
                 warn!("Failed to mark subvolume as read-only off");
             }
 
-            let command_status = process::Command::new("btrfs")
-                .arg("subvolume")
-                .arg("delete")
-                .arg(&current_cache)
-                .status()?;
+            let command_status = delete_subvolume(&current_cache)?;
             if !command_status.success() {
                 warn!("only-fixed-key: couldn't delete commit key");
             }
@@ -408,12 +366,7 @@ fn pull(args: &PullArgs) -> Result<i32> {
         fs::remove_dir_all(&current_cache_directory)?;
     }
 
-    let command_status = process::Command::new("btrfs")
-        .arg("subvolume")
-        .arg("snapshot")
-        .arg(previous_cache_directory)
-        .arg(current_cache_directory.clone())
-        .status()?;
+    let command_status = snapshot_subvolume(previous_cache_directory, &current_cache_directory)?;
 
     if !command_status.success() {
         bail!("Could not create btrfs snapshot");
