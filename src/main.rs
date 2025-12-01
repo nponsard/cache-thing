@@ -201,7 +201,11 @@ fn clean(args: &CleanArgs) -> Result<i32> {
     }
 
     if let Some(ref fixed_key) = args.fixed_key {
-        let fixed_cache = cache_dir.join(hash_file_name(fixed_key));
+        let fixed_cache = cache_dir.join(hash_file_name(&format_cache_key_str(
+            &args.prefix,
+            fixed_key.clone(),
+            args.suffix.clone(),
+        )));
         if fixed_cache.exists() {
             let command_status = delete_subvolume(&fixed_cache)?;
             if !command_status.success() {
