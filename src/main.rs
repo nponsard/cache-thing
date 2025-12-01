@@ -97,6 +97,10 @@ struct CleanArgs {
     /// Optional suffix
     #[arg(short, long)]
     suffix: Option<String>,
+
+    /// Also clean up the fixed key
+    #[arg(long)]
+    fixed_key: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -178,23 +182,34 @@ async fn fetch(args: &FetchArgs) -> Result<i32> {
 }
 
 fn clean(args: &CleanArgs) -> Result<i32> {
-    let cache_dir = get_cache_location();
-    create_dir_all(PathBuf::from(&cache_dir))?;
+    let cache_dir = PathBuf::from(get_cache_location());
+    create_dir_all(&cache_dir)?;
 
     let commit_key = current_key(&args.prefix, args.suffix.clone())?;
 
     info!("Cleaning up cache with key {}", commit_key);
 
-    let current_cache = PathBuf::from(&cache_dir).join(hash_file_name(&commit_key));
+    let current_cache = cache_dir.join(hash_file_name(&commit_key));
 
-    if !current_cache.exists() {
-        info!("Cache does not exist, nothing to clean");
-        return Ok(0);
+    if current_cache.exists() {
+        let command_status = delete_subvolume(&current_cache)?;
+        if !command_status.success() {
+            warn!("couldn't delete commit cache volume");
+        }
+    } else {
+        info!("Current commit cache does not exist, skipping");
     }
 
-    let command_status = delete_subvolume(&current_cache)?;
-    if !command_status.success() {
-        warn!("couldn't delete cache volume");
+    if let Some(ref fixed_key) = args.fixed_key {
+        let fixed_cache = cache_dir.join(hash_file_name(fixed_key));
+        if fixed_cache.exists() {
+            let command_status = delete_subvolume(&fixed_cache)?;
+            if !command_status.success() {
+                warn!("couldn't delete fixed key cache volume");
+            }
+        } else {
+            info!("Current fixed key cache does not exist, skipping");
+        }
     }
 
     info!("Cache cleaned successfully");
