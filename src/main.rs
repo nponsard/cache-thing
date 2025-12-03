@@ -1,19 +1,26 @@
+mod btrfs;
+
 use std::{
-    io::{BufReader, BufWriter, Read},
+    fs::{self, File, create_dir_all},
+    os::unix,
     path::{Path, PathBuf},
+    process,
 };
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
-use flate2::{Compression, write::GzEncoder};
-use gix::{Commit, ObjectId, Repository, hashtable::hash_map::HashMap};
+use gix::{Commit, ObjectId, Repository, hashtable::hash_map::HashMap, prelude::ObjectIdExt};
 use log::{debug, info, trace, warn};
 use sha2::{Digest, Sha256};
 
-use crate::storage_backend::StorageBackend;
+use crate::btrfs::{
+    create_subvolume, delete_subvolume, set_subvolume_readonly, snapshot_subvolume,
+};
 
-mod folder_backend;
-pub mod storage_backend;
+pub fn hash_file_name(key: &str) -> String {
+    let hash = Sha256::digest(key);
+    base16ct::lower::encode_string(&hash)
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "cache-thing")]
@@ -27,6 +34,8 @@ struct Cli {
 enum Commands {
     Push(PushArgs),
     Pull(PullArgs),
+    /// Clean the changes made to the cache.
+    Clean(CleanArgs),
 }
 
 #[derive(Debug, Args)]
@@ -46,6 +55,10 @@ struct PushArgs {
     /// Replace the commit hash with a fixed key
     #[arg(long)]
     fixed_key: Option<String>,
+
+    /// Only store the fixed key, not the commit key
+    #[arg(long)]
+    only_fixed_key: bool,
 }
 
 #[derive(Debug, Args)]
@@ -68,6 +81,21 @@ struct PullArgs {
     fallback_key: Option<String>,
 }
 
+#[derive(Debug, Args)]
+struct CleanArgs {
+    /// Name of the cache, to differentiate if multiple are stored in the same backend
+    #[arg(short, long)]
+    prefix: String,
+
+    /// Optional suffix
+    #[arg(short, long)]
+    suffix: Option<String>,
+
+    /// Also clean up the fixed key
+    #[arg(long)]
+    fixed_key: Option<String>,
+}
+
 fn main() {
     let exit_code = match try_main() {
         Ok(code) => code,
@@ -87,134 +115,285 @@ fn try_main() -> Result<i32> {
     match &args.command {
         Commands::Push(push_args) => push(push_args),
         Commands::Pull(pull_args) => pull(pull_args),
+        Commands::Clean(clean_args) => clean(clean_args),
     }
 }
 
-fn push(args: &PushArgs) -> Result<i32> {
-    let file_backend = get_backend();
+fn clean(args: &CleanArgs) -> Result<i32> {
+    let cache_dir = PathBuf::from(get_cache_location());
+    create_dir_all(&cache_dir)?;
 
-    let key = if let Some(fixed_key) = &args.fixed_key {
-        format_cache_key_str(&args.prefix, fixed_key.clone(), args.suffix.clone())
+    let commit_key = current_key(&args.prefix, args.suffix.clone())?;
+
+    info!("Cleaning up cache with key {}", commit_key);
+
+    let current_cache = cache_dir.join(hash_file_name(&commit_key));
+
+    if current_cache.exists() {
+        let command_status = delete_subvolume(&current_cache)?;
+        if !command_status.success() {
+            warn!("couldn't delete commit cache volume");
+        }
     } else {
-        current_key(&args.prefix, args.suffix.clone())?
-    };
+        info!("Current commit cache does not exist, skipping");
+    }
 
-    info!("Storing cache with key {}", &key);
-
-    let writer = BufWriter::new(file_backend.writer(&key)?);
-    let encoder = GzEncoder::new(writer, Compression::default());
-    let mut archive = tar::Builder::new(encoder);
-    for file in &args.files {
-        let stat = std::fs::metadata(file)?;
-        let hash = hash_from_path(file);
-        if stat.is_dir() {
-            trace!("Adding directory {} to archive", file);
-            archive.append_dir_all(hash, file)?;
+    if let Some(ref fixed_key) = args.fixed_key {
+        let fixed_cache = cache_dir.join(hash_file_name(&format_cache_key_str(
+            &args.prefix,
+            fixed_key.clone(),
+            args.suffix.clone(),
+        )));
+        if fixed_cache.exists() {
+            let command_status = delete_subvolume(&fixed_cache)?;
+            if !command_status.success() {
+                warn!("couldn't delete fixed key cache volume");
+            }
         } else {
-            trace!("Adding file {} to archive", file);
-            archive.append_path_with_name(file, hash)?;
+            info!("Current fixed key cache does not exist, skipping");
         }
     }
 
-    archive.finish()?;
+    info!("Cache cleaned successfully");
+    Ok(0)
+}
 
-    info!("Cache stored with key {}", &key);
+fn push(args: &PushArgs) -> Result<i32> {
+    let cache_dir = get_cache_location();
+    create_dir_all(PathBuf::from(&cache_dir))?;
+
+    let commit_key = current_key(&args.prefix, args.suffix.clone())?;
+    let fixed_key = args.fixed_key.clone().map(|fixed_key| {
+        format_cache_key_str(&args.prefix, fixed_key.clone(), args.suffix.clone())
+    });
+    info!(
+        "Marking cache as finished with key {}, fixed key: {:?}",
+        commit_key, &fixed_key
+    );
+
+    let current_cache = PathBuf::from(&cache_dir).join(hash_file_name(&commit_key));
+
+    if !current_cache.exists() {
+        debug!("Creating volumee: {:?}", current_cache);
+
+        let command_status = create_subvolume(&current_cache)?;
+        if !command_status.success() {
+            bail!("Could not create btrfs subvolume");
+        }
+
+        debug!("Copying files to newly created volume");
+        for file in &args.files {
+            trace!("Copying {}", file);
+            let hash = hash_from_path(file);
+            let cache_path = current_cache.join(&hash);
+
+            let command_status = process::Command::new("cp")
+                .arg("-r")
+                .arg(file)
+                .arg(&cache_path)
+                .status()
+                .context("Copying file using cp")?;
+            if !command_status.success() {
+                bail!("Could not copy file {} to cache", file);
+            }
+        }
+    }
+
+    let finished_file = current_cache.join("finished");
+
+    debug!("Touching finished file");
+    File::create(finished_file).context("Touching finished file")?;
+
+    debug!("Marking subvolume as read-only");
+    // Mark read-only
+    let command_status =
+        set_subvolume_readonly(&current_cache, true).context("Making subvolume read-only")?;
+
+    if !command_status.success() {
+        warn!("Failed to mark subvolume as read-only");
+    }
+
+    if let Some(ref key) = fixed_key {
+        let fixed_cache = PathBuf::from(&cache_dir).join(hash_file_name(key));
+
+        if fixed_cache.exists() {
+            let command_status = set_subvolume_readonly(&fixed_cache, false)
+                .context("Making subvolume not read-only")?;
+
+            if !command_status.success() {
+                warn!("Failed to mark subvolume as read-only off");
+            }
+
+            let status =
+                delete_subvolume(&fixed_cache).context("Deleting old fixed key subvolume")?;
+            if !status.success() {
+                bail!("Failed to delete fixed key subvolume")
+            }
+        }
+
+        let command_status = process::Command::new("btrfs")
+            .arg("subvolume")
+            .arg("snapshot")
+            .arg("-r")
+            .arg(&current_cache)
+            .arg(fixed_cache.clone())
+            .status()?;
+
+        if !command_status.success() {
+            bail!("Could not create btrfs snapshot for fixed key");
+        }
+        if args.only_fixed_key {
+            debug!("Deleding current commit subvolume");
+            let command_status = set_subvolume_readonly(&current_cache, false)
+                .context("Making subvolume not read-only")?;
+
+            if !command_status.success() {
+                warn!("Failed to mark subvolume as read-only off");
+            }
+
+            let command_status = delete_subvolume(&current_cache)?;
+            if !command_status.success() {
+                warn!("only-fixed-key: couldn't delete commit key");
+            }
+        }
+    }
+
     Ok(0)
 }
 
 struct FileEntry {
     pub path: String,
-    pub extracted: bool,
 }
 
 fn pull(args: &PullArgs) -> Result<i32> {
-    let file_backend = get_backend();
+    let volume_location = get_cache_location();
 
-    let possible_keys =
+    let possible_keys: Vec<String> =
         possible_restore_keys(&args.prefix, args.suffix.clone(), args.fallback_key.clone())?;
     let mut key = None;
     for k in possible_keys {
         trace!("Looking for cache with key {}", &k);
-        if file_backend.exists(&k)? {
+
+        // Checking for "finished" file, marking that the the cache is not being written to.
+        let file = PathBuf::from(&volume_location)
+            .join(hash_file_name(&k))
+            .join("finished");
+
+        if file.exists() {
             debug!("Found cache with key {}", &k);
             key = Some(k);
             break;
         }
     }
 
-    let key = if let Some(k) = key {
-        k
-    } else {
-        bail!("No cache found for prefix {}", &args.prefix);
-    };
-
-    let mut file_etries: HashMap<String, FileEntry> = args
+    let directory_entries: HashMap<String, FileEntry> = args
         .files
         .iter()
         .map(|f| {
             let hash = hash_from_path(f);
-            (
-                hash.clone(),
-                FileEntry {
-                    path: f.clone(),
-                    extracted: false,
-                },
-            )
+            (hash.clone(), FileEntry { path: f.clone() })
         })
         .collect();
 
-    let reader = BufReader::new(file_backend.reader(&key)?);
-    let decoder = flate2::read::GzDecoder::new(reader);
-    let mut archive = tar::Archive::new(decoder);
+    let previous_cache_volume =
+        key.map(|k| PathBuf::from(&volume_location).join(hash_file_name(&k)));
 
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        let path = entry.path()?;
-        let components = path.components().collect::<Vec<_>>();
-        let hash = components.first().unwrap().as_os_str().to_string_lossy();
+    let current_key = current_key(&args.prefix, args.suffix.clone())?;
+    let current_cache_volume = PathBuf::from(&volume_location).join(hash_file_name(&current_key));
 
-        if let Some(file_entry) = file_etries.get_mut(&hash.to_string()) {
-            let without_hash = components.iter().skip(1).collect::<PathBuf>();
-            let mut output_path = PathBuf::from(&file_entry.path);
-            output_path.push(&without_hash);
+    if current_cache_volume.exists() {
+        set_subvolume_readonly(&current_cache_volume, false)?;
+        delete_subvolume(&current_cache_volume)?;
+    }
 
-            trace!(
-                "Extracting file {} to {}",
-                path.to_string_lossy(),
-                output_path.to_string_lossy()
-            );
-            entry.unpack(output_path)?;
-            file_entry.extracted = true;
-        } else {
-            trace!(
-                "Skipping file {} (not in requested files)",
-                path.to_string_lossy()
-            );
+    match previous_cache_volume {
+        Some(ref previous) => {
+            let command_status = snapshot_subvolume(previous, &current_cache_volume)?;
+
+            if !command_status.success() {
+                bail!("Could not create btrfs snapshot");
+            }
+            // Mark that we're working on this cache
+            fs::remove_file(current_cache_volume.join("finished"))?;
+        }
+        None => {
+            let command_status = create_subvolume(&current_cache_volume)?;
+            if !command_status.success() {
+                bail!(
+                    "Failed to create subvolume {}",
+                    current_cache_volume.to_string_lossy()
+                );
+            }
         }
     }
 
-    for (_, file_entry) in file_etries.iter().filter(|(_, e)| !e.extracted) {
-        warn!("Path {} was asked but not found in cache", file_entry.path);
+    for (hash, entry) in directory_entries {
+        let cache_entry_path = PathBuf::from(&current_cache_volume).join(&hash);
+
+        if !cache_entry_path.exists() {
+            // create_subvolume(&cache_entry_path)?;
+            fs::create_dir_all(&cache_entry_path)?;
+        }
+        let output_path = PathBuf::from(&entry.path);
+
+        // we replace what was there before
+        if output_path.exists() {
+            // if we are creating the cache, populate it with the existing content
+            if previous_cache_volume.is_none() {
+                let res = process::Command::new("cp")
+                    .arg("-r")
+                    // Add a . to copy all files including hidden files but avoids creating a subfolder at the destination
+                    .arg(output_path.join("."))
+                    .arg(&cache_entry_path)
+                    .status()?;
+                if !res.success() {
+                    warn!("Copying existing files failed");
+                }
+            }
+
+            // This may get removed, we're assuming it's a directory at other places
+            let result = if output_path.is_file() {
+                fs::remove_file(&output_path)
+            } else {
+                fs::remove_dir_all(&output_path)
+            };
+            if let Err(e) = result {
+                warn!(
+                    "Could not remove existing file {}: {}",
+                    output_path.to_string_lossy(),
+                    e
+                );
+            }
+        }
+
+        let result = unix::fs::symlink(&cache_entry_path, &output_path);
+        trace!(
+            "Symlink file {} to {}",
+            cache_entry_path.to_string_lossy(),
+            output_path.to_string_lossy()
+        );
+        if let Err(e) = result {
+            warn!(
+                "Could not create symlink from {} to {}: {}",
+                cache_entry_path.to_string_lossy(),
+                output_path.to_string_lossy(),
+                e
+            );
+        }
     }
 
     Ok(0)
 }
 
-fn get_backend() -> impl StorageBackend {
-    // TODO: storage backend selection
-
-    let location =
-        std::env::var("CACHE_THING_LOCATION").unwrap_or("/tmp/cache-thing/data".to_string());
-
-    folder_backend::FolderBackend::new(std::path::PathBuf::from(location))
+fn get_cache_location() -> String {
+    std::env::var("CACHE_THING_LOCATION").unwrap_or("/tmp/cache-thing/data".to_string())
 }
 
-fn current_key(prefix: &str, suffix: Option<String>) -> Result<String> {
-    let repository = gix::discover(".")?;
+fn get_real_branch_head(repository: &'_ Repository) -> Result<ObjectId> {
     let head = repository.head_commit()?;
     let mut head_id = head.id;
 
-    let main_commit = main_commit(&repository)?;
+    let main_commit = main_commit(repository)?;
 
     // If we're in a merge/pull request, the head is a merge commit between main and the feature branch.
     // We want to find the parent that is not main to use as the cache key.
@@ -230,7 +409,12 @@ fn current_key(prefix: &str, suffix: Option<String>) -> Result<String> {
             }
         }
     }
+    Ok(head_id)
+}
 
+fn current_key(prefix: &str, suffix: Option<String>) -> Result<String> {
+    let repository = gix::discover(".")?;
+    let head_id = get_real_branch_head(&repository)?;
     Ok(format_cache_key(prefix, head_id, suffix))
 }
 
@@ -268,19 +452,25 @@ fn possible_restore_keys(
     let head_parents = head.parent_ids().map(|p| p.detach()).collect::<Vec<_>>();
 
     trace!("HEAD parents: {:?}", head_parents);
+    let branch_head = get_real_branch_head(&repository)?;
 
-    // look for cache in the last 10 commits in the current branch.
-    // if we are on main we look at the last 10 commits of main.
-    let parent_commits = head.ancestors();
-    let parrent_commits = if head.id == main_commit.id {
-        parent_commits
-    } else {
-        parent_commits.with_boundary([main_commit.id])
-    };
+    // look for cache in the last 20 commits in the current branch.
+    let parent_commits = branch_head.attach(&repository).ancestors();
 
-    let parent_commits_list = parrent_commits.all()?.take(10);
+    let parent_commits_list = parent_commits
+        .sorting(gix::revision::walk::Sorting::BreadthFirst)
+        .all()?
+        .take(20);
 
     let mut keys = Vec::new();
+
+    // Push current commit, just in case.
+    if suffix.is_some() {
+        keys.push(format_cache_key(prefix, branch_head, suffix.clone()));
+    }
+    keys.push(format_cache_key(prefix, branch_head, None));
+
+    // Go through parent commits
     for element in parent_commits_list {
         let commit = element?.id;
         trace!("Considering commit {:?}", commit);
