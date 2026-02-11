@@ -393,7 +393,13 @@ fn get_real_branch_head(repository: &'_ Repository) -> Result<ObjectId> {
     let head = repository.head_commit()?;
     let mut head_id = head.id;
 
-    let main_commit = main_commit(repository)?;
+    let main_commit = match main_commit(repository) {
+        Ok(main) => main,
+        Err(e) => {
+            warn!("Couldn't get main commit, limited features availabe. The error was: {e}");
+            return Ok(head_id);
+        }
+    };
 
     // If we're in a merge/pull request, the head is a merge commit between main and the feature branch.
     // We want to find the parent that is not main to use as the cache key.
@@ -437,7 +443,7 @@ fn possible_restore_keys(
 ) -> Result<Vec<String>> {
     let repository = gix::discover(".")?;
 
-    let main_commit = main_commit(&repository)?;
+    let main_commit = main_commit(&repository);
 
     let head = repository.head_commit()?;
     trace!("Current HEAD is at commit {}", head.id);
@@ -475,7 +481,9 @@ fn possible_restore_keys(
         let commit = element?.id;
         trace!("Considering commit {:?}", commit);
 
-        if commit == main_commit.id {
+        if let Ok(ref main_commit) = main_commit
+            && commit == main_commit.id
+        {
             // main commit will be added at the end
             continue;
         }
@@ -497,10 +505,12 @@ fn possible_restore_keys(
         keys.push(format_cache_key_str(prefix, fallback_key, None));
     }
 
-    if suffix.is_some() {
-        keys.push(format_cache_key(prefix, main_commit.id, suffix));
+    if let Ok(main_commit) = main_commit {
+        if suffix.is_some() {
+            keys.push(format_cache_key(prefix, main_commit.id, suffix));
+        }
+        keys.push(format_cache_key(prefix, main_commit.id, None));
     }
-    keys.push(format_cache_key(prefix, main_commit.id, None));
     Ok(keys)
 }
 
